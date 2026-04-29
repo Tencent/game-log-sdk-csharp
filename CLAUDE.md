@@ -49,16 +49,6 @@ dotnet run --project examples/TglogSdk.Examples -- 127.0.0.1 8080
 dotnet run --project integration-test/TglogSdk.IntegrationTest -- --help
 ```
 
-### Code Quality
-
-The codebase enforces:
-- **Nullable reference types** enabled globally
-- **C# LangVersion 10** with modern language features
-- **Implicit usings** for cleaner code
-- **Unsafe code** allowed for performance-critical sections
-
-Recommended IDE: Visual Studio 2022 or VS Code with C# DevKit.
-
 ## Architecture
 
 ### High-Level Design
@@ -187,68 +177,6 @@ var config = TglogConfig.CreateTcp("server", 8080)
 
 SDK logs at Debug (DNS, sockets), Info (client lifecycle, endpoints), Warning (timeouts, failures), Error (init failures).
 
-## Development Tasks
-
-### Adding Configuration
-
-1. Add property to TglogConfig with private setter, public getter
-2. Add fluent setter: SetXxx(value) { Xxx = value; return this; }
-3. Validate in Validate() if needed
-4. Update worker/connection to use it
-
-### Adding Metrics
-
-1. Create Counter/Gauge in TglogMetrics constructor
-2. Register via factory.CreateCounter("name", "help")
-3. Call _metrics.IncrementXxx() from workers
-4. Auto-exposed to Prometheus registry
-
-### Connection Issues
-
-Location: TglogConnection.cs and TglogWorker.cs
-- State machine: Disconnected -> Connecting -> Connected -> Error
-- EAGAIN (buffer full) vs hard errors handled differently
-- Backoff class handles exponential retry delays
-- Output buffer uses LinkedList for partial writes
-
-### Performance Tuning
-
-Key config parameters:
-- **WorkerNum**: Thread count (default 8)
-- **BatchingMaxMessages**: Messages per batch (default 50)
-- **BatchingMaxDelayMs**: Max batch age (default 10ms)
-- **MaxPendingMessages**: Queue depth per worker (default 409,600)
-- **SocketSendBufferSize**: OS buffer (default 64MB)
-
-
-## File Organization
-
-```
-src/TglogSdk/
-  ├── TglogClient.cs          - Main entry point
-  ├── TglogConfig.cs          - Configuration builder
-  ├── TglogWorker.cs          - Worker event loop
-  ├── TglogConnection.cs      - Connection wrapper
-  ├── BatchBuffer.cs          - Message batching
-  ├── LockFreeQueue.cs        - Lock-free MPSC queue
-  ├── EndpointManager.cs      - DNS resolution
-  ├── TglogMetrics.cs         - Prometheus metrics
-  ├── LogMessage.cs           - Message wrapper
-  ├── Backoff.cs              - Retry backoff
-  ├── TglogCallback.cs        - Completion callback
-  ├── TglogException.cs       - Exception type
-  ├── TglogErrorCode.cs       - Error code enum
-  └── TglogSdk.csproj
-
-examples/TglogSdk.Examples/
-  ├── SimpleExample.cs        - Feature demo
-  └── TglogSdk.Examples.csproj
-
-integration-test/TglogSdk.IntegrationTest/
-  ├── TglogClientTest.cs      - Performance test
-  └── TglogSdk.IntegrationTest.csproj
-```
-
 ## Testing
 
 - **SimpleExample.cs** - Comprehensive demo: fire-and-forget, callbacks, async, metrics, high throughput
@@ -273,11 +201,3 @@ Avoids "metric already registered" exceptions.
 - SendAsync() returns Task completing when message sent/failed
 - Callbacks invoked from worker threads (not SendAsync caller thread)
 - Multiple concurrent SendAsync calls safe (each gets TaskCompletionSource)
-
-## Deployment
-
-- **Production**: Release build, disable debug logging, tune batch/worker config
-- **Monitoring**: Expose metrics via prometheus-net HTTP handler
-- **Shutdown**: Use using statement or call Dispose() before exit
-- **Errors**: Callbacks receive TglogException with ErrorCode for context
-
