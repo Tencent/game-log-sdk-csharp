@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Logging;
+using Serilog;
 using Tencent.Tglog;
 
 namespace Tencent.Tglog.IntegrationTest;
@@ -45,6 +47,18 @@ class TglogClientTest
 
     private static void RunTest(TestConfig testConfig)
     {
+        // Setup Serilog as the logging provider.
+        // This demonstrates how to inject an external logging framework into TglogClient.
+        var serilogLogger = new LoggerConfiguration()
+            .MinimumLevel.Is(testConfig.Debug
+                ? Serilog.Events.LogEventLevel.Debug
+                : Serilog.Events.LogEventLevel.Information)
+            .WriteTo.Console(outputTemplate:
+                "[{Timestamp:HH:mm:ss.fff} {Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}")
+            .CreateLogger();
+
+        using var loggerFactory = new LoggerFactory().AddSerilog(serilogLogger);
+
         // Create configuration
         TglogConfig config = (testConfig.Protocol == TglogConfig.Protocol.Tcp
                 ? TglogConfig.CreateTcp(testConfig.Host, testConfig.Port)
@@ -52,7 +66,8 @@ class TglogClientTest
             .SetWorkerNum(testConfig.WorkerNum)
             .SetBatchingMaxMessages(testConfig.BatchSize)
             .SetBatchingMaxDelayMs(10)
-            .SetDebugEnabled(testConfig.Debug);
+            .SetDebugEnabled(testConfig.Debug)
+            .SetLoggerFactory(loggerFactory);
 
         // Create client
         Console.WriteLine("\nCreating client...");
