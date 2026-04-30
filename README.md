@@ -1,6 +1,6 @@
 # TGLog SDK for C#
 
-High-performance game server telemetry SDK for .NET, providing asynchronous, batched log delivery to TGLog infrastructure.
+High-performance game server remote logging SDK for .NET, providing asynchronous, batched log delivery to TGLog infrastructure.
 
 This is a C# port of the Java TGLog SDK, offering identical APIs and behavior for .NET applications.
 
