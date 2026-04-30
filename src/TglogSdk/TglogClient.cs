@@ -323,7 +323,7 @@ public sealed class TglogClient : IDisposable
         _logger.LogInformation($"Client created: {_config.TransportProtocol}://{_config.Host}:{_config.Port} (workers={_workers.Length}, endpoints={initialEndpoints.Count})");
     }
 
-    private void OnEndpointsChanged(List<System.Net.IPEndPoint> newEndpoints)
+    private void OnEndpointsChanged(IReadOnlyList<System.Net.IPEndPoint> newEndpoints)
     {
         _logger.LogInformation($"Endpoints changed: {newEndpoints.Count} endpoints");
         _metrics.SetEndpointCount(newEndpoints.Count);

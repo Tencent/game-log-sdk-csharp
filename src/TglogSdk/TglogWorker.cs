@@ -60,7 +60,7 @@ internal sealed class TglogWorker
 
     // Queues
     private readonly LockFreeQueue<LogMessage> _messageQueue;
-    private readonly ConcurrentQueue<List<IPEndPoint>> _endpointUpdateQueue = new();
+    private readonly ConcurrentQueue<IReadOnlyList<IPEndPoint>> _endpointUpdateQueue = new();
 
     // Connections
     private readonly List<TglogConnection> _connections = new(8);
@@ -76,7 +76,7 @@ internal sealed class TglogWorker
     private readonly Dictionary<string, int> _endpointRetryCount = new();
 
     // Initial endpoints (set before start)
-    private List<IPEndPoint>? _initialEndpoints;
+    private IReadOnlyList<IPEndPoint>? _initialEndpoints;
 
     // Batch management
     private BatchBuffer _currentBatch;
@@ -116,7 +116,7 @@ internal sealed class TglogWorker
     }
 
     /// <summary>Sets the initial endpoints before the worker starts.</summary>
-    public void SetInitialEndpoints(List<IPEndPoint> endpoints)
+    public void SetInitialEndpoints(IReadOnlyList<IPEndPoint> endpoints)
     {
         _initialEndpoints = endpoints;
     }
@@ -140,7 +140,7 @@ internal sealed class TglogWorker
     }
 
     /// <summary>Notifies the worker of an endpoint change (called from EndpointManager thread).</summary>
-    public void NotifyEndpointUpdate(List<IPEndPoint> newEndpoints)
+    public void NotifyEndpointUpdate(IReadOnlyList<IPEndPoint> newEndpoints)
     {
         _endpointUpdateQueue.Enqueue(newEndpoints);
     }
@@ -1139,7 +1139,7 @@ internal sealed class TglogWorker
         }
     }
 
-    private void HandleEndpointUpdate(List<IPEndPoint> newEndpoints)
+    private void HandleEndpointUpdate(IReadOnlyList<IPEndPoint> newEndpoints)
     {
         _logger.LogInformation($"Worker {_workerId}: processing endpoint update: {newEndpoints.Count} endpoints");
 

@@ -17,7 +17,7 @@ internal sealed class EndpointManager : IDisposable
 
     private Timer? _timer;
     private volatile List<IPEndPoint> _currentEndpoints = new();
-    private readonly List<Action<List<IPEndPoint>>> _changeListeners = new();
+    private readonly List<Action<IReadOnlyList<IPEndPoint>>> _changeListeners = new();
     private bool _disposed;
 
     public EndpointManager(TglogConfig config, ILoggerFactory loggerFactory)
@@ -28,11 +28,11 @@ internal sealed class EndpointManager : IDisposable
         _logger = loggerFactory.CreateLogger("TGLog.EndpointManager");
     }
 
-    /// <summary>Current resolved endpoints.</summary>
-    public List<IPEndPoint> CurrentEndpoints => _currentEndpoints;
+    /// <summary>Current resolved endpoints (read-only snapshot).</summary>
+    public IReadOnlyList<IPEndPoint> CurrentEndpoints => _currentEndpoints;
 
     /// <summary>Registers a listener to be called when endpoints change.</summary>
-    public void AddChangeListener(Action<List<IPEndPoint>> listener)
+    public void AddChangeListener(Action<IReadOnlyList<IPEndPoint>> listener)
     {
         _changeListeners.Add(listener);
     }
@@ -115,12 +115,12 @@ internal sealed class EndpointManager : IDisposable
 
     private void NotifyListeners(List<IPEndPoint> newEndpoints)
     {
-        var copy = new List<IPEndPoint>(newEndpoints);
+        var readOnly = newEndpoints.AsReadOnly();
         foreach (var listener in _changeListeners)
         {
             try
             {
-                listener(copy);
+                listener(readOnly);
             }
             catch (Exception ex)
             {
