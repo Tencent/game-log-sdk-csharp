@@ -233,26 +233,27 @@ public sealed class TglogClient : IDisposable
         foreach (var worker in _workers)
             worker.Stop();
 
-        // Wait for workers to finish
+        // Wait for workers to finish.
+        // Worker Cleanup() internally uses StopTimeoutMs for drain + up to 2s for
+        // flushing connection buffers, so we allow extra headroom beyond StopTimeoutMs.
+        int joinTimeoutMs = _config.StopTimeoutMs + 3000;
         bool allStopped = true;
         foreach (var worker in _workers)
         {
-            if (!worker.Join(_config.StopTimeoutMs))
+            if (!worker.Join(joinTimeoutMs))
             {
                 allStopped = false;
                 _logger.LogWarning("Worker did not stop within timeout");
             }
         }
 
-        // Unregister metrics only after workers have fully stopped.
-        // If a worker thread is still running and calling metrics.xxx.Inc(),
-        // unregistering concurrently can leave the Prometheus registry in
-        // an inconsistent state. Do it last so the shared CollectorRegistry
-        // is clean for the next TglogClient instance (config hot-reload,
-        // webapp redeploy, tests, etc.).
+        // Unregister metrics after all workers have stopped.
+        // If a worker somehow still hasn't exited (should be extremely rare given
+        // the generous join timeout), we unregister anyway — a stuck worker thread
+        // is unlikely to be actively calling Inc() at this point.
         if (!allStopped)
         {
-            _logger.LogWarning("Not all workers stopped, metrics may be inconsistent");
+            _logger.LogWarning("Not all workers stopped, proceeding with metrics unregister");
         }
         try
         {
