@@ -24,6 +24,24 @@ public sealed class TglogConfig
         Udp
     }
 
+    // --- Defaults ---
+
+    private const Protocol DefaultTransportProtocol = Protocol.Tcp;
+    private const int DefaultConnectionTimeoutMs = 3000;
+    private const int DefaultMaxConnectionLifetimeSec = 300;
+    private const int DefaultDnsUpdateIntervalSec = 60;
+    private const int DefaultBatchingMaxMessages = 50;
+    private const int DefaultBatchingMaxSize = 32 * 1024;
+    private const int DefaultBatchingMaxDelayMs = 10;
+    private const int DefaultWorkerNum = 8;
+    private const int DefaultMaxPendingMessages = 409600;
+    private const int DefaultWriteHighWatermark = 32 * 1024 * 1024;
+    private const int DefaultSocketSendBufferSize = 64 * 1024 * 1024;
+    private const int DefaultSocketRecvBufferSize = 16 * 1024;
+    private const int DefaultSendTimeoutMs = 30000;
+    private const int DefaultMaxRetries = 10;
+    private const int DefaultStopTimeoutMs = 3000;
+
     // --- Network Configuration ---
 
     /// <summary>Transport protocol (TCP or UDP).</summary>
@@ -36,54 +54,54 @@ public sealed class TglogConfig
     public int Port { get; private set; }
 
     /// <summary>Connection timeout in milliseconds. Default: 3000.</summary>
-    public int ConnectionTimeoutMs { get; private set; } = 3000;
+    public int ConnectionTimeoutMs { get; private set; } = DefaultConnectionTimeoutMs;
 
     /// <summary>Maximum connection lifetime in seconds (0 = persistent). Default: 300.</summary>
-    public int MaxConnectionLifetimeSec { get; private set; } = 300;
+    public int MaxConnectionLifetimeSec { get; private set; } = DefaultMaxConnectionLifetimeSec;
 
     /// <summary>DNS resolution interval in seconds. Default: 60.</summary>
-    public int DnsUpdateIntervalSec { get; private set; } = 60;
+    public int DnsUpdateIntervalSec { get; private set; } = DefaultDnsUpdateIntervalSec;
 
     // --- Batching Configuration ---
 
     /// <summary>Maximum messages per batch. Default: 50.</summary>
-    public int BatchingMaxMessages { get; private set; } = 50;
+    public int BatchingMaxMessages { get; private set; } = DefaultBatchingMaxMessages;
 
     /// <summary>Maximum batch size in bytes. Default: 32KB.</summary>
-    public int BatchingMaxSize { get; private set; } = 32 * 1024;
+    public int BatchingMaxSize { get; private set; } = DefaultBatchingMaxSize;
 
     /// <summary>Maximum batch delay in milliseconds. Default: 10.</summary>
-    public int BatchingMaxDelayMs { get; private set; } = 10;
+    public int BatchingMaxDelayMs { get; private set; } = DefaultBatchingMaxDelayMs;
 
     // --- Worker Configuration ---
 
     /// <summary>Number of worker threads. Default: 8.</summary>
-    public int WorkerNum { get; private set; } = 8;
+    public int WorkerNum { get; private set; } = DefaultWorkerNum;
 
     /// <summary>Maximum pending messages per worker. Default: 409600.</summary>
-    public int MaxPendingMessages { get; private set; } = 409600;
+    public int MaxPendingMessages { get; private set; } = DefaultMaxPendingMessages;
 
     // --- Buffer Configuration ---
 
     /// <summary>Output buffer high watermark in bytes. Default: 32MB.</summary>
-    public int WriteHighWatermark { get; private set; } = 32 * 1024 * 1024;
+    public int WriteHighWatermark { get; private set; } = DefaultWriteHighWatermark;
 
     /// <summary>Socket send buffer size (SO_SNDBUF). Default: 64MB.</summary>
-    public int SocketSendBufferSize { get; private set; } = 64 * 1024 * 1024;
+    public int SocketSendBufferSize { get; private set; } = DefaultSocketSendBufferSize;
 
     /// <summary>Socket receive buffer size (SO_RCVBUF). Default: 16KB.</summary>
-    public int SocketRecvBufferSize { get; private set; } = 16 * 1024;
+    public int SocketRecvBufferSize { get; private set; } = DefaultSocketRecvBufferSize;
 
     // --- Retry Configuration ---
 
     /// <summary>Send timeout in milliseconds. Default: 30000.</summary>
-    public int SendTimeoutMs { get; private set; } = 30000;
+    public int SendTimeoutMs { get; private set; } = DefaultSendTimeoutMs;
 
     /// <summary>Maximum retry attempts per batch. Default: 10.</summary>
-    public int MaxRetries { get; private set; } = 10;
+    public int MaxRetries { get; private set; } = DefaultMaxRetries;
 
     /// <summary>Shutdown timeout in milliseconds. Default: 3000.</summary>
-    public int StopTimeoutMs { get; private set; } = 3000;
+    public int StopTimeoutMs { get; private set; } = DefaultStopTimeoutMs;
 
     // --- Debug ---
 
@@ -157,29 +175,47 @@ public sealed class TglogConfig
 
     // --- Validation ---
 
-    /// <summary>Validates all configuration parameters. Throws <see cref="TglogException"/> on invalid config.</summary>
+    /// <summary>
+    /// Validates configuration parameters. Required endpoint fields still throw;
+    /// invalid optional values are reset to their defaults.
+    /// </summary>
     internal void Validate()
     {
         if (string.IsNullOrWhiteSpace(Host))
             throw new TglogException(TglogErrorCode.BadFlag, "Host cannot be null or empty");
         if (Port < 1 || Port > 65535)
             throw new TglogException(TglogErrorCode.BadFlag, $"Port must be 1-65535, got {Port}");
+
+        if (!Enum.IsDefined(typeof(Protocol), TransportProtocol))
+            TransportProtocol = DefaultTransportProtocol;
         if (WorkerNum < 1)
-            throw new TglogException(TglogErrorCode.BadFlag, $"WorkerNum must be >= 1, got {WorkerNum}");
+            WorkerNum = DefaultWorkerNum;
         if (BatchingMaxMessages < 1)
-            throw new TglogException(TglogErrorCode.BadFlag, $"BatchingMaxMessages must be >= 1, got {BatchingMaxMessages}");
+            BatchingMaxMessages = DefaultBatchingMaxMessages;
         if (BatchingMaxSize < 1)
-            throw new TglogException(TglogErrorCode.BadFlag, $"BatchingMaxSize must be >= 1, got {BatchingMaxSize}");
-        if (BatchingMaxDelayMs < 0)
-            throw new TglogException(TglogErrorCode.BadFlag, $"BatchingMaxDelayMs must be >= 0, got {BatchingMaxDelayMs}");
+            BatchingMaxSize = DefaultBatchingMaxSize;
+        if (BatchingMaxDelayMs <= 0)
+            BatchingMaxDelayMs = DefaultBatchingMaxDelayMs;
         if (MaxPendingMessages < 1)
-            throw new TglogException(TglogErrorCode.BadFlag, $"MaxPendingMessages must be >= 1, got {MaxPendingMessages}");
-        if (ConnectionTimeoutMs < 0)
-            throw new TglogException(TglogErrorCode.BadFlag, $"ConnectionTimeoutMs must be >= 0, got {ConnectionTimeoutMs}");
-        if (SendTimeoutMs < 0)
-            throw new TglogException(TglogErrorCode.BadFlag, $"SendTimeoutMs must be >= 0, got {SendTimeoutMs}");
+            MaxPendingMessages = DefaultMaxPendingMessages;
+        if (ConnectionTimeoutMs <= 0)
+            ConnectionTimeoutMs = DefaultConnectionTimeoutMs;
+        if (MaxConnectionLifetimeSec < 0)
+            MaxConnectionLifetimeSec = DefaultMaxConnectionLifetimeSec;
+        if (DnsUpdateIntervalSec <= 0)
+            DnsUpdateIntervalSec = DefaultDnsUpdateIntervalSec;
+        if (WriteHighWatermark <= 0)
+            WriteHighWatermark = DefaultWriteHighWatermark;
+        if (SocketSendBufferSize <= 0)
+            SocketSendBufferSize = DefaultSocketSendBufferSize;
+        if (SocketRecvBufferSize <= 0)
+            SocketRecvBufferSize = DefaultSocketRecvBufferSize;
+        if (SendTimeoutMs <= 0)
+            SendTimeoutMs = DefaultSendTimeoutMs;
         if (MaxRetries < 0)
-            throw new TglogException(TglogErrorCode.BadFlag, $"MaxRetries must be >= 0, got {MaxRetries}");
+            MaxRetries = DefaultMaxRetries;
+        if (StopTimeoutMs <= 0)
+            StopTimeoutMs = DefaultStopTimeoutMs;
 
         // Auto-adjust batching max size to fit within protocol limits
         if (BatchingMaxSize > MaxRequestSize)
