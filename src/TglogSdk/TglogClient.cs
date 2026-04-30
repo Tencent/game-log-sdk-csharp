@@ -83,12 +83,12 @@ public sealed class TglogClient : IDisposable
                 try { _endpointManager.Dispose(); }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning($"Failed to dispose endpoint manager during construction cleanup: {ex.Message}");
+                    _logger.LogWarning("Failed to dispose endpoint manager during construction cleanup: {Message}", ex.Message);
                 }
                 try { _metrics.Unregister(); }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning($"Failed to unregister metrics during construction cleanup: {ex.Message}");
+                    _logger.LogWarning("Failed to unregister metrics during construction cleanup: {Message}", ex.Message);
                 }
             }
         }
@@ -116,7 +116,7 @@ public sealed class TglogClient : IDisposable
             }
             catch (Exception ex)
             {
-                _logger.LogWarning($"Exception in user callback: {ex.Message}");
+                _logger.LogWarning("Exception in user callback: {Message}", ex.Message);
             }
 
             if (exception == null)
@@ -261,7 +261,7 @@ public sealed class TglogClient : IDisposable
         }
         catch (Exception e)
         {
-            _logger.LogWarning($"Failed to unregister metrics during close: {e.Message}");
+            _logger.LogWarning("Failed to unregister metrics during close: {Message}", e.Message);
         }
 
         _logger.LogInformation("Client shutdown complete");
@@ -287,7 +287,7 @@ public sealed class TglogClient : IDisposable
         // Auto-adjust batching max size based on protocol limits
         if (_config.BatchingMaxSize > _config.MaxRequestSize)
         {
-            _logger.LogWarning($"Batching max size ({_config.BatchingMaxSize}) exceeds protocol limit ({_config.MaxRequestSize}), adjusting");
+            _logger.LogWarning("Batching max size ({BatchingMaxSize}) exceeds protocol limit ({MaxRequestSize}), adjusting", _config.BatchingMaxSize, _config.MaxRequestSize);
         }
 
         // Create and start workers
@@ -305,7 +305,7 @@ public sealed class TglogClient : IDisposable
             if (!worker.WaitForReady(waitTimeout))
             {
                 // A worker failed to become ready — abort startup and rollback
-                _logger.LogError($"Worker failed to become ready within {waitTimeout}ms, aborting startup");
+                _logger.LogError("Worker failed to become ready within {TimeoutMs}ms, aborting startup", waitTimeout);
                 foreach (var w in _workers)
                 {
                     if (w != null)
@@ -321,12 +321,12 @@ public sealed class TglogClient : IDisposable
 
         _running = 1;
 
-        _logger.LogInformation($"Client created: {_config.TransportProtocol}://{_config.Host}:{_config.Port} (workers={_workers.Length}, endpoints={initialEndpoints.Count})");
+        _logger.LogInformation("Client created: {Protocol}://{Host}:{Port} (workers={WorkerCount}, endpoints={EndpointCount})", _config.TransportProtocol, _config.Host, _config.Port, _workers.Length, initialEndpoints.Count);
     }
 
     private void OnEndpointsChanged(IReadOnlyList<System.Net.IPEndPoint> newEndpoints)
     {
-        _logger.LogInformation($"Endpoints changed: {newEndpoints.Count} endpoints");
+        _logger.LogInformation("Endpoints changed: {Count} endpoints", newEndpoints.Count);
         _metrics.SetEndpointCount(newEndpoints.Count);
 
         foreach (var worker in _workers)

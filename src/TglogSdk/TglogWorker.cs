@@ -201,7 +201,7 @@ internal sealed class TglogWorker
         }
         catch (Exception ex)
         {
-            _logger.LogError($"Worker {_workerId}: fatal error: {ex}");
+            _logger.LogError(ex, "Worker {WorkerId}: fatal error", _workerId);
         }
         finally
         {
@@ -211,7 +211,7 @@ internal sealed class TglogWorker
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Worker {_workerId}: error during cleanup: {ex}");
+                _logger.LogError(ex, "Worker {WorkerId}: error during cleanup", _workerId);
             }
             // Guarantee terminal state for all remaining messages, even if Cleanup threw
             FailRemainingMessages();
@@ -225,11 +225,11 @@ internal sealed class TglogWorker
     {
         if (_initialEndpoints == null || _initialEndpoints.Count == 0)
         {
-            _logger.LogWarning($"Worker {_workerId}: no initial endpoints");
+            _logger.LogWarning("Worker {WorkerId}: no initial endpoints", _workerId);
             return;
         }
 
-        _logger.LogInformation($"Worker {_workerId}: initializing connections, endpoints={_initialEndpoints.Count}");
+        _logger.LogInformation("Worker {WorkerId}: initializing connections, endpoints={EndpointCount}", _workerId, _initialEndpoints.Count);
 
         _currentEndpoints = new List<IPEndPoint>(_initialEndpoints);
         _connectionsPerEndpoint = _currentEndpoints.Count <= 2 ? 2 : 1;
@@ -267,7 +267,7 @@ internal sealed class TglogWorker
                 $"Worker {_workerId}: no connections established during initialization");
         }
 
-        _logger.LogInformation($"Worker {_workerId}: using {_connectionsPerEndpoint} connections per endpoint (total endpoints: {_currentEndpoints.Count})");
+        _logger.LogInformation("Worker {WorkerId}: using {ConnectionsPerEndpoint} connections per endpoint (total endpoints: {EndpointCount})", _workerId, _connectionsPerEndpoint, _currentEndpoints.Count);
     }
 
     private void WaitForConnectingConnections(int timeoutMs)
@@ -327,7 +327,7 @@ internal sealed class TglogWorker
             }
             catch (Exception ex)
             {
-                _logger.LogWarning($"Worker {_workerId}: WaitForConnecting error: {ex.Message}");
+                _logger.LogWarning("Worker {WorkerId}: WaitForConnecting error: {Message}", _workerId, ex.Message);
                 break;
             }
         }
@@ -335,7 +335,7 @@ internal sealed class TglogWorker
         // Timeout: close remaining connecting connections
         if (_connectingConns.Count > 0)
         {
-            _logger.LogWarning($"Worker {_workerId}: {_connectingConns.Count} connections timed out during initialization");
+            _logger.LogWarning("Worker {WorkerId}: {Count} connections timed out during initialization", _workerId, _connectingConns.Count);
         }
 
         for (int i = _connectingConns.Count - 1; i >= 0; i--)
@@ -417,7 +417,7 @@ internal sealed class TglogWorker
             }
         }
 
-        _logger.LogInformation($"Worker {_workerId}: event loop ended");
+        _logger.LogInformation("Worker {WorkerId}: event loop ended", _workerId);
     }
 
     private void BuildSelectLists()
@@ -476,7 +476,7 @@ internal sealed class TglogWorker
         }
         catch (SocketException ex)
         {
-            _logger.LogWarning($"Worker {_workerId}: select error: {ex.Message}");
+            _logger.LogWarning("Worker {WorkerId}: select error: {Message}", _workerId, ex.Message);
             _selectReadList.Clear();
             _selectWriteList.Clear();
             _selectErrorList.Clear();
@@ -555,7 +555,7 @@ internal sealed class TglogWorker
                 {
                     _connectingConns.RemoveAt(i);
                     _connections.Add(conn);
-                    _logger.LogInformation($"Worker {_workerId}: connection ready: {conn.Endpoint} (total: {_connections.Count})");
+                    _logger.LogInformation("Worker {WorkerId}: connection ready: {Endpoint} (total: {Count})", _workerId, conn.Endpoint, _connections.Count);
                 }
                 else
                 {
@@ -585,7 +585,7 @@ internal sealed class TglogWorker
                 if (_currentBatch.IsRetryTimeout((int)totalBackoff) ||
                     _currentBatch.IsSendTimeout(_config.SendTimeoutMs))
                 {
-                    _logger.LogWarning($"Worker {_workerId}: batch retry/send timeout");
+                    _logger.LogWarning("Worker {WorkerId}: batch retry/send timeout", _workerId);
                     FailCurrentBatch(TglogErrorCode.SendTimeout);
                     // Continue to process new messages
                 }
@@ -610,7 +610,7 @@ internal sealed class TglogWorker
             // Check batch send timeout
             if (_currentBatch.IsSendTimeout(_config.SendTimeoutMs))
             {
-                _logger.LogWarning($"Worker {_workerId}: batch send timeout");
+                _logger.LogWarning("Worker {WorkerId}: batch send timeout", _workerId);
                 FailCurrentBatch(TglogErrorCode.SendTimeout);
             }
 
@@ -713,7 +713,7 @@ internal sealed class TglogWorker
         var conn = GetConnection();
         if (conn == null)
         {
-            _logger.LogError($"Worker {_workerId}: no available connections");
+            _logger.LogError("Worker {WorkerId}: no available connections", _workerId);
             return SendResult.Error(TglogErrorCode.NoAvailableConn);
         }
 
@@ -741,7 +741,7 @@ internal sealed class TglogWorker
             if (sent < 0)
             {
                 // Connection error
-                _logger.LogError($"Worker {_workerId}: TCP send error on {conn.Endpoint}, trying next");
+                _logger.LogError("Worker {WorkerId}: TCP send error on {Endpoint}, trying next", _workerId, conn.Endpoint);
                 HandleConnectionError(conn, true);
                 tryCount++;
                 conn = GetConnection()!;
@@ -752,7 +752,7 @@ internal sealed class TglogWorker
             if (sent == 0)
             {
                 // High watermark exceeded — try next connection
-                _logger.LogWarning($"Worker {_workerId}: connection {conn.Endpoint} exceeded high watermark");
+                _logger.LogWarning("Worker {WorkerId}: connection {Endpoint} exceeded high watermark", _workerId, conn.Endpoint);
                 tryCount++;
                 conn = GetNextConnection(conn);
                 if (conn == null) break;
@@ -821,7 +821,7 @@ internal sealed class TglogWorker
         _metrics.IncrementRetryMsg();
 
         long backoffMs = Backoff.BatchRetry.GetNextInterval(_currentBatch.RetryCount);
-        _logger.LogInformation($"Worker {_workerId}: retrying batch in {backoffMs}ms (attempt {_currentBatch.RetryCount}/{_config.MaxRetries})");
+        _logger.LogInformation("Worker {WorkerId}: retrying batch in {BackoffMs}ms (attempt {RetryCount}/{MaxRetries})", _workerId, backoffMs, _currentBatch.RetryCount, _config.MaxRetries);
 
         return false; // Still retrying
     }
@@ -848,7 +848,7 @@ internal sealed class TglogWorker
             SupplementConnection();
             if (_connections.Count == 0)
             {
-                _logger.LogError($"Worker {_workerId}: no available connections");
+                _logger.LogError("Worker {WorkerId}: no available connections", _workerId);
                 return null;
             }
         }
@@ -925,7 +925,7 @@ internal sealed class TglogWorker
             delayMs = DefaultConnCloseDelayMs;
         }
 
-        _logger.LogInformation($"Worker {_workerId}: scheduling connection close in {delayMs}ms: {conn.Endpoint}");
+        _logger.LogInformation("Worker {WorkerId}: scheduling connection close in {DelayMs}ms: {Endpoint}", _workerId, delayMs, conn.Endpoint);
 
         _pendingCloseList.Add(new DelayedClose
         {
@@ -983,7 +983,7 @@ internal sealed class TglogWorker
         }
 
         // No connection available to rescue data
-        _logger.LogWarning($"Worker {_workerId}: lost {rescuedBytes} bytes - no rescue connection");
+        _logger.LogWarning("Worker {WorkerId}: lost {RescuedBytes} bytes - no rescue connection", _workerId, rescuedBytes);
     }
 
     private void ReplaceExpiredConnections()
@@ -1098,7 +1098,7 @@ internal sealed class TglogWorker
                 if (CreateConnection(endpoint) != null)
                     return;
                 else
-                    _logger.LogWarning($"Worker {_workerId}: supplement connection failed for {endpoint}");
+                    _logger.LogWarning("Worker {WorkerId}: supplement connection failed for {Endpoint}", _workerId, endpoint);
             }
         }
 
@@ -1113,7 +1113,7 @@ internal sealed class TglogWorker
             if (!_unavailableEndpoints.ContainsKey(key))
             {
                 if (CreateConnection(endpoint) == null)
-                    _logger.LogWarning($"Worker {_workerId}: force supplement connection failed for {endpoint}");
+                    _logger.LogWarning("Worker {WorkerId}: force supplement connection failed for {Endpoint}", _workerId, endpoint);
             }
         }
     }
@@ -1141,7 +1141,7 @@ internal sealed class TglogWorker
 
     private void HandleEndpointUpdate(IReadOnlyList<IPEndPoint> newEndpoints)
     {
-        _logger.LogInformation($"Worker {_workerId}: processing endpoint update: {newEndpoints.Count} endpoints");
+        _logger.LogInformation("Worker {WorkerId}: processing endpoint update: {Count} endpoints", _workerId, newEndpoints.Count);
 
         var oldSet = new HashSet<string>(_currentEndpoints.Select(GetEndpointKey));
         var newSet = new HashSet<string>(newEndpoints.Select(GetEndpointKey));
@@ -1201,7 +1201,7 @@ internal sealed class TglogWorker
         _currentEndpoints = new List<IPEndPoint>(newEndpoints);
         _metrics.SetEndpointCount(_currentEndpoints.Count);
 
-        _logger.LogInformation($"Worker {_workerId}: endpoint update complete, added={added.Count}, removed={removed.Count}, total={_currentEndpoints.Count}");
+        _logger.LogInformation("Worker {WorkerId}: endpoint update complete, added={Added}, removed={Removed}, total={Total}", _workerId, added.Count, removed.Count, _currentEndpoints.Count);
     }
 
     // ==================== Cleanup ====================
@@ -1209,7 +1209,7 @@ internal sealed class TglogWorker
     private void Cleanup()
     {
         int remaining = _messageQueue.Size + (_pendingMessage != null ? 1 : 0) + _currentBatch.MessageCount;
-        _logger.LogInformation($"Worker {_workerId}: flushing {remaining} remaining messages");
+        _logger.LogInformation("Worker {WorkerId}: flushing {Remaining} remaining messages", _workerId, remaining);
 
         // Drain remaining messages
         long deadline = Environment.TickCount64 + _config.StopTimeoutMs;
@@ -1240,7 +1240,7 @@ internal sealed class TglogWorker
 
         if (Environment.TickCount64 >= deadline)
         {
-            _logger.LogWarning($"Worker {_workerId}: cleanup timed out, failing remaining messages");
+            _logger.LogWarning("Worker {WorkerId}: cleanup timed out, failing remaining messages", _workerId);
             // Fail all messages still in queue/batch — don't leave them hanging
             FailRemainingMessages();
         }
@@ -1294,7 +1294,7 @@ internal sealed class TglogWorker
 
         _socketToConnection.Clear();
 
-        _logger.LogInformation($"Worker {_workerId}: cleanup completed");
+        _logger.LogInformation("Worker {WorkerId}: cleanup completed", _workerId);
     }
 
     private void SendBatchNoRetry()
@@ -1370,7 +1370,7 @@ internal sealed class TglogWorker
         if (failedCount > 0)
         {
             _metrics.AddFailedMsg(failedCount);
-            _logger.LogWarning($"Worker {_workerId}: failed {failedCount} remaining queued messages during shutdown");
+            _logger.LogWarning("Worker {WorkerId}: failed {FailedCount} remaining queued messages during shutdown", _workerId, failedCount);
         }
     }
 
@@ -1386,7 +1386,7 @@ internal sealed class TglogWorker
         }
         catch (Exception ex)
         {
-            _logger.LogWarning($"Exception in user callback: {ex.Message}");
+            _logger.LogWarning("Exception in user callback: {Message}", ex.Message);
         }
     }
 
@@ -1434,7 +1434,7 @@ internal sealed class TglogWorker
         {
             _unavailableEndpoints[key] = Environment.TickCount64;
             _endpointRetryCount[key] = 0;
-            _logger.LogWarning($"Worker {_workerId}: marked endpoint unavailable: {key}");
+            _logger.LogWarning("Worker {WorkerId}: marked endpoint unavailable: {Key}", _workerId, key);
         }
     }
 

@@ -53,7 +53,7 @@ internal sealed class EndpointManager : IDisposable
         var interval = TimeSpan.FromSeconds(_config.DnsUpdateIntervalSec);
         _timer = new Timer(_ => UpdateEndpoints(), null, interval, interval);
 
-        _logger.LogInformation($"Started DNS resolver for {_host} (interval: {_config.DnsUpdateIntervalSec}s)");
+        _logger.LogInformation("Started DNS resolver for {Host} (interval: {IntervalSec}s)", _host, _config.DnsUpdateIntervalSec);
     }
 
     /// <summary>Stops the endpoint manager.</summary>
@@ -87,7 +87,7 @@ internal sealed class EndpointManager : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError($"DNS resolution failed for {_host}: {ex.Message}");
+            _logger.LogError("DNS resolution failed for {Host}: {Message}", _host, ex.Message);
         }
     }
 
@@ -124,7 +124,7 @@ internal sealed class EndpointManager : IDisposable
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Listener exception: {ex.Message}");
+                _logger.LogError("Listener exception: {Message}", ex.Message);
             }
         }
     }

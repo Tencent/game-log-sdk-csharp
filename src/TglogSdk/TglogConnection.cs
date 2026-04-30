@@ -106,7 +106,7 @@ internal sealed class TglogConnection
         {
             if (_protocol == TglogConfig.Protocol.Tcp)
             {
-                _logger.LogInformation($"Connecting to {_endpoint}");
+                _logger.LogInformation("Connecting to {Endpoint}", _endpoint);
 
                 _socket = new Socket(_endpoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
                 _socket.Blocking = false;
@@ -135,13 +135,13 @@ internal sealed class TglogConnection
                 _socket.Blocking = false;
                 ConfigureSocketBuffers(_socket);
                 _socket.Connect(_endpoint); // UDP connect just sets the default destination
-                _logger.LogInformation($"Connected to {_endpoint} (UDP)");
+                _logger.LogInformation("Connected to {Endpoint} (UDP)", _endpoint);
                 return FinishConnect();
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning($"Connect failed to {_endpoint}: {ex.Message}");
+            _logger.LogWarning("Connect failed to {Endpoint}: {Message}", _endpoint, ex.Message);
             _state = ConnectionState.Error;
             _retryCount++;
             _lastRetryAttemptTicks = Environment.TickCount64;
@@ -168,7 +168,7 @@ internal sealed class TglogConnection
                     int errorCode = (int)_socket.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Error)!;
                     if (errorCode != 0)
                     {
-                        _logger.LogWarning($"FinishConnect error for {_endpoint}: socket error {errorCode}");
+                        _logger.LogWarning("FinishConnect error for {Endpoint}: socket error {ErrorCode}", _endpoint, errorCode);
                         _state = ConnectionState.Error;
                         return false;
                     }
@@ -183,13 +183,13 @@ internal sealed class TglogConnection
             _lifetimeWithJitterMs = CalculateLifetimeWithJitter();
             _metrics.IncrementOpenedConn(_workerId);
 
-            _logger.LogInformation($"Connected to {_endpoint} (lifetime: {_lifetimeWithJitterMs}ms)");
+            _logger.LogInformation("Connected to {Endpoint} (lifetime: {LifetimeMs}ms)", _endpoint, _lifetimeWithJitterMs);
 
             return true;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, $"Failed to finish connection to {_endpoint}: {ex.Message}");
+            _logger.LogError(ex, "Failed to finish connection to {Endpoint}", _endpoint);
             _state = ConnectionState.Error;
             return false;
         }
@@ -420,7 +420,7 @@ internal sealed class TglogConnection
         }
         catch (SocketException ex)
         {
-            _logger.LogError($"Failed to flush output buffer for {_endpoint}: {ex.Message}");
+            _logger.LogError("Failed to flush output buffer for {Endpoint}: {Message}", _endpoint, ex.Message);
             _state = ConnectionState.Error;
         }
         catch (ObjectDisposedException)
@@ -517,7 +517,7 @@ internal sealed class TglogConnection
         }
 
         if (totalSize > 0)
-            _logger.LogInformation($"Rescued {totalSize} bytes of pending data from another connection");
+            _logger.LogInformation("Rescued {TotalSize} bytes of pending data from another connection", totalSize);
 
         return true;
     }
@@ -536,7 +536,7 @@ internal sealed class TglogConnection
         _outputBuffer.Clear();
         _outputBufferSize = 0;
 
-        _logger.LogInformation($"Closed connection to {_endpoint}");
+        _logger.LogInformation("Closed connection to {Endpoint}", _endpoint);
     }
 
     // --- Private Methods ---
@@ -664,7 +664,7 @@ internal sealed class TglogConnection
         }
         catch (SocketException ex)
         {
-            _logger.LogWarning($"Failed to set socket buffer sizes: {ex.Message}");
+            _logger.LogWarning("Failed to set socket buffer sizes: {Message}", ex.Message);
         }
     }
 
