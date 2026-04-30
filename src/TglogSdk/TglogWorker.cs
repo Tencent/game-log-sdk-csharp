@@ -46,6 +46,7 @@ internal sealed class TglogWorker
     {
         public TglogConnection Connection { get; init; }
         public long DeadlineTicks { get; init; }
+        public bool IsError { get; init; }
     }
 
     // --- Fields ---
@@ -451,10 +452,10 @@ internal sealed class TglogWorker
             }
         }
 
-        // Also check delayed close connections for writability
+        // Also check non-error delayed close connections for writability
         foreach (var dc in _pendingCloseList)
         {
-            if (dc.Connection.Socket != null && dc.Connection.HasBufferedData)
+            if (!dc.IsError && dc.Connection.Socket != null && dc.Connection.HasBufferedData)
             {
                 _selectWriteList.Add(dc.Connection.Socket);
             }
@@ -893,9 +894,10 @@ internal sealed class TglogWorker
 
     private void HandleConnectionError(TglogConnection conn, bool fromSend)
     {
-        // Remove from active connections
+        // Remove from active connections and stop watching network events
         _connections.Remove(conn);
         _connectingConns.Remove(conn);
+        UnregisterSocket(conn);
 
         // Mark endpoint unavailable (like Java)
         MarkEndpointUnavailable(conn.Endpoint);
@@ -912,8 +914,23 @@ internal sealed class TglogWorker
 
     private void CloseConnectionWithDelay(TglogConnection conn, bool isError)
     {
-        // Remove any existing pending close for this connection
-        _pendingCloseList.RemoveAll(dc => dc.Connection == conn);
+        for (int i = 0; i < _pendingCloseList.Count; i++)
+        {
+            var dc = _pendingCloseList[i];
+            if (dc.Connection != conn) continue;
+
+            if (isError && !dc.IsError)
+            {
+                int errorDelayMs = conn.HasBufferedData ? ErrorConnCloseDelayWithDataMs : ErrorConnCloseDelayNoDataMs;
+                _pendingCloseList[i] = new DelayedClose
+                {
+                    Connection = dc.Connection,
+                    DeadlineTicks = Math.Min(dc.DeadlineTicks, Environment.TickCount64 + errorDelayMs),
+                    IsError = true
+                };
+            }
+            return;
+        }
 
         int delayMs;
         if (isError)
@@ -930,7 +947,8 @@ internal sealed class TglogWorker
         _pendingCloseList.Add(new DelayedClose
         {
             Connection = conn,
-            DeadlineTicks = Environment.TickCount64 + delayMs
+            DeadlineTicks = Environment.TickCount64 + delayMs,
+            IsError = isError
         });
     }
 
