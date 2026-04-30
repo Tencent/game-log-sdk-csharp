@@ -40,16 +40,16 @@ var config = TglogConfig.CreateTcp("server-host", 20001)
 using var client = new TglogClient(config);
 
 // Fire-and-forget
-client.Send("{\"event\":\"login\",\"user_id\":123}\n");
+client.Send("login|1001|player_abc|success\n");
 
 // With callback
-client.Send("{\"event\":\"purchase\",\"item\":\"sword\"}\n", (payload, ex) =>
+client.Send("purchase|1001|sword|100\n", (payload, ex) =>
 {
     if (ex != null) Console.WriteLine($"Failed: {ex.Message}");
 });
 
 // Async/await
-await client.SendAsync("{\"event\":\"game_start\"}\n");
+await client.SendAsync("game_start|1001|map_01|team_a\n");
 
 // Flush before shutdown
 client.Flush(5000);
