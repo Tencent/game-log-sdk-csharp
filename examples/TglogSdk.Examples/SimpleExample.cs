@@ -100,7 +100,7 @@ class SimpleExample
             Console.WriteLine("=== Example 2: Fire-and-Forget Send ===");
             for (int i = 0; i < 10; i++)
             {
-                client.Send($"{{\"event\":\"login\",\"user_id\":{i},\"timestamp\":\"{DateTime.UtcNow:O}\"}}\n");
+                client.Send($"login|{i}|{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ}\n");
             }
             Console.WriteLine("  Sent 10 messages (fire-and-forget)");
 
@@ -112,7 +112,7 @@ class SimpleExample
             for (int i = 0; i < 10; i++)
             {
                 client.Send(
-                    $"{{\"event\":\"item_purchase\",\"item_id\":{1000 + i}}}\n",
+                    $"item_purchase|{i}|{1000 + i}|1|99\n",
                     (payload, exception) =>
                     {
                         if (exception == null)
@@ -126,7 +126,7 @@ class SimpleExample
             Console.WriteLine("=== Example 4: Async/Await Send ===");
             try
             {
-                await client.SendAsync($"{{\"event\":\"game_start\",\"session\":\"abc123\"}}\n");
+                await client.SendAsync("game_start|abc123|1|0\n");
                 Console.WriteLine("  Async send succeeded");
             }
             catch (TglogException ex)
@@ -149,7 +149,7 @@ class SimpleExample
 
             for (int i = 0; i < totalMessages; i++)
             {
-                client.Send($"{{\"event\":\"tick\",\"seq\":{i}}}\n");
+                client.Send($"tick|{i}\n");
             }
 
             sw.Stop();
