@@ -20,7 +20,7 @@ internal sealed class TglogWorker
 {
     // --- Constants (matching Java) ---
     private const int MsgPerRun = 3000;
-    private const long EndpointRecoverIntervalMs = 30000;
+    private const long EndpointRecoverIntervalMs = 5000;
     private const long ConnectionReplaceCheckIntervalMs = 20000;
     private const long EmergencySupplementIntervalMs = 5000;
     private const long MetricsUpdateIntervalMs = 5000;
