@@ -1265,13 +1265,31 @@ internal sealed class TglogWorker
         // Recalculate connections per endpoint
         _connectionsPerEndpoint = newEndpoints.Count <= 2 ? 2 : 1;
 
+        // Update the endpoint view BEFORE adding/removing connections. A newly added endpoint may
+        // fail to connect synchronously, in which case MarkEndpointUnavailable() is called below;
+        // that method consults _currentEndpoints.Count to decide whether backoff applies, so it must
+        // already reflect the new topology, otherwise the new endpoint would be checked against the
+        // old (smaller) list and wrongly skipped (e.g. A -> A+B, B unreachable, Count was still 1).
+        _currentEndpoints = new List<IPEndPoint>(newEndpoints);
+        _metrics.SetEndpointCount(_currentEndpoints.Count);
+
         // Add connections for new endpoints first
         foreach (var endpoint in added)
         {
+            bool anyConnected = false;
             for (int i = 0; i < _connectionsPerEndpoint; i++)
             {
-                CreateConnection(endpoint);
+                if (CreateConnection(endpoint) != null)
+                {
+                    anyConnected = true;
+                }
             }
+
+            if (!anyConnected)
+            {
+                MarkEndpointUnavailable(endpoint);
+            }
+
             _metrics.IncrementAddEndpoint();
         }
 
@@ -1308,9 +1326,6 @@ internal sealed class TglogWorker
             _endpointRetryCount.Remove(key);
             _metrics.IncrementRemoveEndpoint();
         }
-
-        _currentEndpoints = new List<IPEndPoint>(newEndpoints);
-        _metrics.SetEndpointCount(_currentEndpoints.Count);
 
         _logger.LogInformation("Worker {WorkerId}: endpoint update complete, added={Added}, removed={Removed}, total={Total}", _workerId, added.Count, removed.Count, _currentEndpoints.Count);
     }
