@@ -183,27 +183,49 @@ public sealed class TglogClient : IDisposable
     /// Waits for all pending messages to be sent, up to the specified timeout.
     /// Returns true if all messages were flushed within the timeout.
     /// </summary>
+    /// <remarks>
+    /// During normal operation you do not need to call <c>Flush</c>; messages are
+    /// batched and sent automatically by worker threads. To shut down, just call
+    /// <see cref="Dispose"/> — it flushes pending messages (bounded by
+    /// <see cref="TglogConfig.StopTimeoutMs"/>) before stopping workers and releasing
+    /// resources. <c>Flush</c> is still useful for tests or before a critical
+    /// checkpoint where you need to guarantee delivery at a specific point.
+    /// </remarks>
     public bool Flush(int timeoutMs = 5000)
     {
-        long deadline = Environment.TickCount64 + timeoutMs;
-
-        while (Environment.TickCount64 < deadline)
+        // Post a flush request to each worker rather than inspecting worker-internal
+        // state from this (caller) thread. Each worker completes its task from inside
+        // the worker thread once it has drained all pending work, so we never touch
+        // the worker's non-thread-safe structures cross-thread. The timeout budget is
+        // enforced here, in the caller — workers never expire a request themselves.
+        var tasks = new Task<bool>[_workers.Length];
+        for (int i = 0; i < _workers.Length; i++)
         {
-            bool anyPending = false;
-            foreach (var worker in _workers)
-            {
-                if (worker.HasPendingWork())
-                {
-                    anyPending = true;
-                    break;
-                }
-            }
-
-            if (!anyPending) return true;
-            Thread.Sleep(10);
+            tasks[i] = _workers[i].RequestFlush();
         }
 
-        return false;
+        long deadline = Environment.TickCount64 + timeoutMs;
+        bool allDrained = true;
+        foreach (var task in tasks)
+        {
+            long remaining = deadline - Environment.TickCount64;
+            if (remaining <= 0)
+            {
+                // Out of time budget; only count it if already completed as drained.
+                if (!task.IsCompletedSuccessfully || !task.Result)
+                    allDrained = false;
+            }
+            else if (task.Wait((int)remaining))
+            {
+                if (!task.Result) allDrained = false;
+            }
+            else
+            {
+                allDrained = false;
+            }
+        }
+
+        return allDrained;
     }
 
     /// <summary>Returns the metrics as a JSON string.</summary>
@@ -213,7 +235,7 @@ public sealed class TglogClient : IDisposable
     public string GetMetricsString() => _metrics.ToString();
 
     /// <summary>
-    /// Gracefully shuts down the client: flushes pending messages and closes all connections.
+    /// Gracefully shuts down the client: flushes pending messages, then closes all connections.
     /// </summary>
     public void Dispose()
     {
@@ -223,7 +245,9 @@ public sealed class TglogClient : IDisposable
         _running = 0;
         _logger.LogInformation("Client shutting down");
 
-        // Flush pending messages
+        // Flush pending messages before tearing down workers. Workers also drain
+        // remaining messages during their own cleanup, but flushing first gives
+        // them a chance to deliver under the normal (retrying) send path.
         Flush(_config.StopTimeoutMs);
 
         // Stop endpoint manager

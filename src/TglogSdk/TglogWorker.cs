@@ -63,6 +63,11 @@ internal sealed class TglogWorker
     private readonly LockFreeQueue<LogMessage> _messageQueue;
     private readonly ConcurrentQueue<IReadOnlyList<IPEndPoint>> _endpointUpdateQueue = new();
 
+    // Flush requests submitted by application threads; resolved on the worker thread.
+    // Timeout handling lives entirely in TglogClient.Flush — the worker only decides
+    // whether all pending work has drained.
+    private readonly ConcurrentQueue<TaskCompletionSource<bool>> _flushRequestQueue = new();
+
     // Connections
     private readonly List<TglogConnection> _connections = new(8);
     private readonly List<TglogConnection> _connectingConns = new(8);
@@ -146,8 +151,44 @@ internal sealed class TglogWorker
         _endpointUpdateQueue.Enqueue(newEndpoints);
     }
 
-    /// <summary>Returns true if the worker has pending messages or buffered data.</summary>
-    public bool HasPendingWork()
+    /// <summary>
+    /// Submits a flush request to the worker. The returned task completes with
+    /// <c>true</c> once the worker has drained all pending work, or <c>false</c>
+    /// if the worker stopped before draining. Does NOT block and does NOT inspect
+    /// worker-internal state on the caller thread — the worker thread completes the
+    /// task. Timeout handling is the caller's responsibility (see TglogClient.Flush).
+    /// </summary>
+    public Task<bool> RequestFlush()
+    {
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Enqueue first, then re-check state. Ordering matters: if we enqueue before
+        // the worker transitions to Closing, the event loop or the shutdown path
+        // (CompleteFlushRequestsOnStop) will service it. If the worker has already
+        // stopped, there is no loop to service it, so we complete it here. We never
+        // call HasPendingWorkInternal() on this (caller) thread.
+        _flushRequestQueue.Enqueue(tcs);
+
+        if (_state != WorkerState.Ready && _state != WorkerState.Init)
+        {
+            // Worker is closing/closed and may never poll the queue again. Drain it
+            // here ourselves and complete with false: we cannot guarantee a full
+            // flush once the worker is no longer processing.
+            while (_flushRequestQueue.TryDequeue(out var pending))
+            {
+                pending.TrySetResult(false);
+            }
+        }
+
+        return tcs.Task;
+    }
+
+    /// <summary>
+    /// Worker-thread-only check: returns true if there are pending messages,
+    /// an in-flight batch, or buffered connection data. MUST only be called from
+    /// the worker thread, as it reads worker-owned state without synchronization.
+    /// </summary>
+    private bool HasPendingWorkInternal()
     {
         if (!_messageQueue.IsEmpty) return true;
         if (_pendingMessage != null) return true;
@@ -216,7 +257,18 @@ internal sealed class TglogWorker
             }
             // Guarantee terminal state for all remaining messages, even if Cleanup threw
             FailRemainingMessages();
+
+            // Release any flush waiters before flipping to Closed, so a concurrent
+            // RequestFlush() that observed Ready/Closing has its task completed here.
+            CompleteFlushRequestsOnStop();
+
             _state = WorkerState.Closed;
+
+            // A RequestFlush() racing with the state flip above may have enqueued
+            // after CompleteFlushRequestsOnStop ran but before _state became Closed.
+            // RequestFlush itself drains when it sees a non-Ready state, but to cover
+            // the interleaving where it enqueued just before that check, drain again.
+            CompleteFlushRequestsOnStop();
         }
     }
 
@@ -380,7 +432,10 @@ internal sealed class TglogWorker
             // 6. Process messages
             ProcessMessages();
 
-            // 7. Periodic maintenance
+            // 7. Resolve any pending flush requests now that work has progressed
+            ProcessFlushRequests();
+
+            // 8. Periodic maintenance
             now = Environment.TickCount64;
 
             if (now - _lastEndpointRecoverTime >= EndpointRecoverIntervalMs)
@@ -1145,6 +1200,44 @@ internal sealed class TglogWorker
         foreach (var conn in _connectingConns)
             if (GetEndpointKey(conn.Endpoint) == key) count++;
         return count;
+    }
+
+    // ==================== Flush Requests ====================
+
+    /// <summary>
+    /// Resolves pending flush requests (worker thread only). If any work is still
+    /// pending, the entire queue is left untouched to be re-checked on the next
+    /// event-loop iteration; otherwise every outstanding request completes with
+    /// <c>true</c>. Timeouts are handled by the caller, so the worker never expires
+    /// a request itself.
+    /// </summary>
+    private void ProcessFlushRequests()
+    {
+        if (_flushRequestQueue.IsEmpty) return;
+
+        // Evaluate pending work once per pass — identical for all waiting requests.
+        if (HasPendingWorkInternal()) return;
+
+        while (_flushRequestQueue.TryDequeue(out var tcs))
+        {
+            tcs.TrySetResult(true);
+        }
+    }
+
+    /// <summary>
+    /// Completes all outstanding flush requests on worker shutdown so callers
+    /// awaiting a flush never hang. Reports <c>true</c> only if no work remains at
+    /// this point, otherwise <c>false</c>. (Worker thread, cleanup path.)
+    /// </summary>
+    private void CompleteFlushRequestsOnStop()
+    {
+        if (_flushRequestQueue.IsEmpty) return;
+
+        bool drained = !HasPendingWorkInternal();
+        while (_flushRequestQueue.TryDequeue(out var tcs))
+        {
+            tcs.TrySetResult(drained);
+        }
     }
 
     // ==================== Endpoint Updates ====================
