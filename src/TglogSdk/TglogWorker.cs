@@ -627,9 +627,26 @@ internal sealed class TglogWorker
 
     // ==================== Message Processing ====================
 
-    private void ProcessMessages()
+    private void ProcessMessages() => ProcessMessages(false);
+
+    /// <summary>
+    /// Processes messages from the queue.
+    /// </summary>
+    /// <param name="shutdown">
+    /// When true the worker is draining during <see cref="Cleanup"/>: the batch is sent
+    /// immediately without honoring retry backoff, and a failed send fails the batch
+    /// instead of re-arming a retry. This guarantees forward progress on every call so
+    /// the cleanup drain loop cannot busy-spin until the stop timeout elapses (it would
+    /// otherwise, because a batch stuck in backoff makes ProcessMessages return without
+    /// consuming the queue).
+    /// </param>
+    private void ProcessMessages(bool shutdown)
     {
         int processed = 0;
+
+        // During shutdown we never re-enter the retry/backoff state: one send attempt,
+        // accept its outcome.
+        bool retry = !shutdown;
 
         while (processed < MsgPerRun && (_state == WorkerState.Ready || _state == WorkerState.Closing))
         {
@@ -645,12 +662,14 @@ internal sealed class TglogWorker
                     FailCurrentBatch(TglogErrorCode.SendTimeout);
                     // Continue to process new messages
                 }
-                else if (_currentBatch.ShouldRetryNow(Backoff.BatchRetry))
+                else if (shutdown || _currentBatch.ShouldRetryNow(Backoff.BatchRetry))
                 {
-                    // Time to retry - attempt to send the batch again
+                    // Time to retry - attempt to send the batch again. During shutdown
+                    // we ignore the backoff window and retry now so the drain loop can
+                    // finish fast instead of waiting out backoff.
                     if (_logger.IsEnabled(LogLevel.Debug))
                         _logger.LogDebug($"Worker {_workerId}: attempting retry {_currentBatch.RetryCount}/{_config.MaxRetries}");
-                    if (!SendBatch(true))
+                    if (!SendBatch(retry))
                     {
                         break; // Still retrying (will check again in next iteration)
                     }
@@ -673,7 +692,7 @@ internal sealed class TglogWorker
             // Send current batch if ready (count/size/timeout triggers)
             if (_currentBatch.ShouldFlush())
             {
-                if (!SendBatch(true))
+                if (!SendBatch(retry))
                 {
                     break; // Batch is retrying
                 }
@@ -702,7 +721,7 @@ internal sealed class TglogWorker
             {
                 // Save message and send current batch first
                 _pendingMessage = msg;
-                if (!SendBatch(true))
+                if (!SendBatch(retry))
                 {
                     break; // Batch is retrying
                 }
@@ -714,7 +733,7 @@ internal sealed class TglogWorker
             {
                 // Batch full - save message and send batch
                 _pendingMessage = msg;
-                if (!SendBatch(true))
+                if (!SendBatch(retry))
                 {
                     break; // Batch is retrying
                 }
@@ -726,7 +745,7 @@ internal sealed class TglogWorker
                 (_currentBatch.MessageCount >= _config.BatchingMaxMessages ||
                  _currentBatch.CurrentSize >= _config.BatchingMaxSize))
             {
-                if (!SendBatch(true))
+                if (!SendBatch(retry))
                 {
                     break; // Batch is retrying
                 }
@@ -1008,6 +1027,11 @@ internal sealed class TglogWorker
         });
     }
 
+    /// <summary>
+    /// Closes delayed-close connections whose deadline has elapsed, rescuing any
+    /// buffered data first. Called from the worker event loop. The shutdown path in
+    /// <see cref="Cleanup"/> rescue-closes the remaining entries directly.
+    /// </summary>
     private void ProcessPendingCloses()
     {
         long now = Environment.TickCount64;
@@ -1018,18 +1042,27 @@ internal sealed class TglogWorker
             if (now >= dc.DeadlineTicks)
             {
                 _pendingCloseList.RemoveAt(i);
-
-                // Try to rescue buffered data
-                RescueData(dc.Connection);
-
-                UnregisterSocket(dc.Connection);
-                dc.Connection.Close();
-                _metrics.IncrementClosedConn(_workerId);
-
-                if (_logger.IsEnabled(LogLevel.Debug))
-                    _logger.LogDebug($"Worker {_workerId}: closed delayed connection: {dc.Connection.Endpoint}");
+                RescueAndCloseConnection(dc.Connection);
             }
         }
+    }
+
+    /// <summary>
+    /// Rescues any buffered data from the connection into a healthy active connection,
+    /// then unregisters and closes it. Shared by the delayed-close path and shutdown
+    /// cleanup so both rescue before discarding buffered data.
+    /// </summary>
+    private void RescueAndCloseConnection(TglogConnection conn)
+    {
+        // Try to rescue buffered data before the socket (and its buffer) is dropped.
+        RescueData(conn);
+
+        UnregisterSocket(conn);
+        conn.Close();
+        _metrics.IncrementClosedConn(_workerId);
+
+        if (_logger.IsEnabled(LogLevel.Debug))
+            _logger.LogDebug($"Worker {_workerId}: rescued and closed connection: {conn.Endpoint}");
     }
 
     private void RescueData(TglogConnection closingConn)
@@ -1338,72 +1371,62 @@ internal sealed class TglogWorker
         int remaining = _messageQueue.Size + (_pendingMessage != null ? 1 : 0) + _currentBatch.MessageCount;
         _logger.LogInformation("Worker {WorkerId}: flushing {Remaining} remaining messages", _workerId, remaining);
 
-        // Drain remaining messages
+        // 1. Drain queued/pending/batch messages. ProcessMessages(shutdown:true) sends
+        //    without retry/backoff so a batch stuck in backoff is flushed immediately and
+        //    the loop always makes forward progress (otherwise it would busy-spin until
+        //    the deadline). Send the final partial batch after each pass.
         long deadline = Environment.TickCount64 + _config.StopTimeoutMs;
-
-        while (Environment.TickCount64 < deadline)
+        bool flushTimedOut = false;
+        while (!_messageQueue.IsEmpty || _pendingMessage != null)
         {
-            // Process remaining messages without retry
-            var msg = _pendingMessage;
-            _pendingMessage = null;
-            if (msg == null) msg = _messageQueue.Poll();
-            if (msg == null)
+            if (Environment.TickCount64 >= deadline)
             {
-                if (!_currentBatch.IsEmpty)
-                {
-                    SendBatchNoRetry();
-                }
+                flushTimedOut = true;
                 break;
             }
 
-            _metrics.IncrementDequeuedMsg();
+            ProcessMessages(shutdown: true);
 
-            if (!_currentBatch.Add(msg))
+            // Send final batch (no retry on shutdown)
+            if (!_currentBatch.IsEmpty)
             {
-                SendBatchNoRetry();
-                _currentBatch.Add(msg);
+                SendBatch(false);
             }
         }
 
-        if (Environment.TickCount64 >= deadline)
+        // 2. Send the final partial batch (no retry on shutdown).
+        if (!_currentBatch.IsEmpty)
+        {
+            SendBatch(false);
+        }
+
+        // 3. Fail any messages that could not be flushed in time so their callbacks
+        //    complete instead of hanging.
+        if (flushTimedOut || !_messageQueue.IsEmpty || _pendingMessage != null || !_currentBatch.IsEmpty)
         {
             _logger.LogWarning("Worker {WorkerId}: cleanup timed out, failing remaining messages", _workerId);
-            // Fail all messages still in queue/batch — don't leave them hanging
             FailRemainingMessages();
         }
 
-        // Send final partial batch
-        if (!_currentBatch.IsEmpty)
-        {
-            SendBatchNoRetry();
-        }
+        // 4. Drain connection output buffers (active + delayed-close) while sockets
+        //    are still alive.
+        DrainConnectionBuffers();
 
-        // Flush connection buffers
-        long flushDeadline = Environment.TickCount64 + Math.Min(_config.StopTimeoutMs, 2000);
-        while (Environment.TickCount64 < flushDeadline)
-        {
-            bool anyBuffered = false;
-            foreach (var conn in _connections)
-            {
-                if (conn.HasBufferedData)
-                {
-                    conn.TryFlush();
-                    anyBuffered = true;
-                }
-            }
-            if (!anyBuffered) break;
-            Thread.Sleep(1);
-        }
-
-        // Close all pending delayed-close connections
+        // 5. Rescue-and-close all delayed-close connections, moving leftover buffered
+        //    data into the still-open active connections. Must run while _connections
+        //    is still populated, since RescueData picks its target from that list.
+        if (_logger.IsEnabled(LogLevel.Debug))
+            _logger.LogDebug($"Worker {_workerId}: rescue-closing {_pendingCloseList.Count} pending delayed-close connections");
         foreach (var dc in _pendingCloseList)
         {
-            UnregisterSocket(dc.Connection);
-            dc.Connection.Close();
+            RescueAndCloseConnection(dc.Connection);
         }
         _pendingCloseList.Clear();
 
-        // Close all active and connecting connections
+        // 6. Rescue may have moved data onto active connections — drain once more.
+        DrainConnectionBuffers();
+
+        // 7. Close all active and connecting connections.
         foreach (var conn in _connections)
         {
             UnregisterSocket(conn);
@@ -1424,18 +1447,60 @@ internal sealed class TglogWorker
         _logger.LogInformation("Worker {WorkerId}: cleanup completed", _workerId);
     }
 
-    private void SendBatchNoRetry()
+    /// <summary>
+    /// Drains buffered data from active and delayed-close connections, waiting on
+    /// socket writability via <see cref="Socket.Select"/> (mirroring the steady-state
+    /// event loop) rather than busy-waiting. Returns when all buffers are empty or
+    /// the stop timeout elapses.
+    /// </summary>
+    private void DrainConnectionBuffers()
     {
-        if (_currentBatch.IsEmpty) return;
-        if (_connections.Count == 0)
+        long deadline = Environment.TickCount64 + _config.StopTimeoutMs;
+
+        while (Environment.TickCount64 < deadline)
         {
-            // No available connections — fail the entire batch explicitly
-            FailCurrentBatch(TglogErrorCode.NoAvailableConn);
-            return;
+            _selectWriteList.Clear();
+            bool anyBuffered = false;
+
+            foreach (var conn in _connections)
+            {
+                if (conn.Socket != null && conn.HasBufferedData)
+                {
+                    conn.TryFlush();
+                    if (conn.HasBufferedData)
+                    {
+                        _selectWriteList.Add(conn.Socket);
+                        anyBuffered = true;
+                    }
+                }
+            }
+            foreach (var dc in _pendingCloseList)
+            {
+                if (dc.Connection.Socket != null && dc.Connection.HasBufferedData)
+                {
+                    dc.Connection.TryFlush();
+                    if (dc.Connection.HasBufferedData)
+                    {
+                        _selectWriteList.Add(dc.Connection.Socket);
+                        anyBuffered = true;
+                    }
+                }
+            }
+
+            if (!anyBuffered) return;
+
+            // Wait for any buffered connection to become writable (5ms), like the event loop.
+            try
+            {
+                Socket.Select(null, _selectWriteList, null, 5_000);
+            }
+            catch (SocketException)
+            {
+                // A socket faulted while waiting; loop will re-flush survivors.
+            }
         }
 
-        // Send without retry (used during cleanup)
-        SendBatch(false);
+        _logger.LogWarning("Worker {WorkerId}: drain timeout, some data may be unflushed", _workerId);
     }
 
     // ==================== Terminal State Guarantee ====================
