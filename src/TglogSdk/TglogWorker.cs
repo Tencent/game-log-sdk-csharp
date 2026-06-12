@@ -806,32 +806,27 @@ internal sealed class TglogWorker
 
     private SendResult SendBatchTcp(TglogConnection startConn, ArraySegment<byte>[] buffers)
     {
-        int tryCount = 0;
-        var conn = startConn;
-
-        while (tryCount < _connections.Count)
+        // Snapshot the active connections up front. HandleConnectionError() removes
+        // the failing connection from _connections, so iterating against the live
+        // list (or relying on the failing conn for "next") would skip still-healthy
+        // connections. We try every connection that was active at send time, starting
+        // from the round-robin pick, until one accepts the batch.
+        foreach (var conn in EnumerateConnectionsFrom(startConn))
         {
             long sent = conn.Send(buffers);
 
             if (sent < 0)
             {
-                // Connection error
+                // Connection error — drop it and try the next snapshot entry.
                 _logger.LogError("Worker {WorkerId}: TCP send error on {Endpoint}, trying next", _workerId, conn.Endpoint);
                 HandleConnectionError(conn, true);
-                tryCount++;
-                var nextConn = GetConnection();
-                if (nextConn == null) break;
-                conn = nextConn;
                 continue;
             }
 
             if (sent == 0)
             {
-                // High watermark exceeded — try next connection
+                // High watermark exceeded — try the next connection.
                 _logger.LogWarning("Worker {WorkerId}: connection {Endpoint} exceeded high watermark", _workerId, conn.Endpoint);
-                tryCount++;
-                conn = GetNextConnection(conn);
-                if (conn == null) break;
                 continue;
             }
 
@@ -846,11 +841,11 @@ internal sealed class TglogWorker
 
     private SendResult SendBatchUdp(TglogConnection startConn, ArraySegment<byte>[] buffers)
     {
-        int maxTries = Math.Min(_connections.Count, 3);
-        int tryCount = 0;
-        var conn = startConn;
-
-        while (tryCount < maxTries)
+        // Try every connection that was active at send time (one full round), starting
+        // from the round-robin pick. Only if none accept the datagram do we report a
+        // failure and let the batch enter the retry path. Snapshotting up front avoids
+        // skipping healthy connections when HandleConnectionError() removes a failing one.
+        foreach (var conn in EnumerateConnectionsFrom(startConn))
         {
             long sent = conn.Send(buffers);
 
@@ -861,23 +856,37 @@ internal sealed class TglogWorker
 
             if (sent == 0)
             {
-                // EAGAIN — try next
+                // EAGAIN — try the next connection.
                 if (_logger.IsEnabled(LogLevel.Debug))
-                    _logger.LogDebug($"Worker {_workerId}: UDP send would block, trying another (attempt {tryCount + 1}/{maxTries})");
-                tryCount++;
-                conn = GetNextConnection(conn);
-                if (conn == null) break;
+                    _logger.LogDebug($"Worker {_workerId}: UDP send would block on {conn.Endpoint}, trying another");
                 continue;
             }
 
-            // sent < 0: error
+            // sent < 0: error — drop it and try the next snapshot entry.
             HandleConnectionError(conn, true);
-            tryCount++;
-            conn = GetNextConnection(conn);
-            if (conn == null) break;
         }
 
         return SendResult.Error(TglogErrorCode.SendFailed);
+    }
+
+    /// <summary>
+    /// Yields the active connections for one send attempt, starting at <paramref name="startConn"/>
+    /// (the round-robin pick) and wrapping around. The set of connections is snapshotted at
+    /// enumeration start, so connections removed mid-iteration (e.g. by HandleConnectionError)
+    /// do not shorten the walk or cause healthy connections to be skipped.
+    /// </summary>
+    private IEnumerable<TglogConnection> EnumerateConnectionsFrom(TglogConnection startConn)
+    {
+        var snapshot = _connections.ToArray();
+        if (snapshot.Length == 0) yield break;
+
+        int startIdx = Array.IndexOf(snapshot, startConn);
+        if (startIdx < 0) startIdx = 0;
+
+        for (int i = 0; i < snapshot.Length; i++)
+        {
+            yield return snapshot[(startIdx + i) % snapshot.Length];
+        }
     }
 
     /// <summary>
@@ -931,17 +940,6 @@ internal sealed class TglogWorker
 
         long index = Interlocked.Increment(ref _connectionIndex) & long.MaxValue;
         return _connections[(int)(index % _connections.Count)];
-    }
-
-    private TglogConnection? GetNextConnection(TglogConnection current)
-    {
-        if (_connections.Count <= 1) return null;
-
-        int currentIdx = _connections.IndexOf(current);
-        if (currentIdx < 0) return _connections.Count > 0 ? _connections[0] : null;
-
-        int nextIdx = (currentIdx + 1) % _connections.Count;
-        return _connections[nextIdx];
     }
 
     private TglogConnection? CreateConnection(IPEndPoint endpoint)
