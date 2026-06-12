@@ -314,33 +314,50 @@ public sealed class TglogClient : IDisposable
             _logger.LogWarning("Batching max size ({BatchingMaxSize}) exceeds protocol limit ({MaxRequestSize}), adjusting", _config.BatchingMaxSize, _config.MaxRequestSize);
         }
 
-        // Create and start workers
-        for (int i = 0; i < _workers.Length; i++)
-        {
-            _workers[i] = new TglogWorker(i, _config, _metrics, _loggerFactory);
-            _workers[i].SetInitialEndpoints(initialEndpoints);
-            _workers[i].Start();
-        }
-
-        // Wait for workers to be ready
         int waitTimeout = _config.ConnectionTimeoutMs * 2;
-        foreach (var worker in _workers)
+
+        try
         {
-            if (!worker.WaitForReady(waitTimeout))
+            // Create and start workers
+            for (int i = 0; i < _workers.Length; i++)
             {
-                // A worker failed to become ready — abort startup and rollback
-                _logger.LogError("Worker failed to become ready within {TimeoutMs}ms, aborting startup", waitTimeout);
-                foreach (var w in _workers)
+                _workers[i] = new TglogWorker(i, _config, _metrics, _loggerFactory);
+                _workers[i].SetInitialEndpoints(initialEndpoints);
+                _workers[i].Start();
+            }
+
+            // Wait for workers to be ready
+            foreach (var worker in _workers)
+            {
+                if (!worker.WaitForReady(waitTimeout))
                 {
-                    if (w != null)
+                    // A worker failed to become ready — abort startup
+                    _logger.LogError("Worker failed to become ready within {TimeoutMs}ms, aborting startup", waitTimeout);
+                    throw new TglogException(TglogErrorCode.NewConnFailed,
+                        "One or more workers failed to become ready");
+                }
+            }
+        }
+        catch
+        {
+            // Any failure during worker creation/start/ready-wait must stop and join
+            // every worker that was already started, so no background threads leak.
+            foreach (var w in _workers)
+            {
+                if (w != null)
+                {
+                    try
                     {
                         w.Stop();
                         w.Join(waitTimeout);
                     }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning("Failed to stop worker during startup rollback: {Message}", ex.Message);
+                    }
                 }
-                throw new TglogException(TglogErrorCode.NewConnFailed,
-                    "One or more workers failed to become ready");
             }
+            throw;
         }
 
         _running = 1;
