@@ -404,6 +404,18 @@ internal sealed class TglogConnection
         {
             if (ex.SocketErrorCode == SocketError.WouldBlock)
             {
+                // UDP is all-or-nothing: a datagram either goes out whole or not at all.
+                // Buffering it (TCP-style) would let the worker treat a dropped datagram as
+                // success. Match the normal UDP EAGAIN path: drop and return 0 so the worker
+                // retries on another connection.
+                if (_protocol == TglogConfig.Protocol.Udp)
+                {
+                    if (_logger.IsEnabled(LogLevel.Debug))
+                        _logger.LogDebug($"EAGAIN for {_endpoint} (UDP): dropped datagram of {buffers[0].Count} bytes");
+                    _metrics.IncrementEagainErr(_workerId);
+                    return 0;
+                }
+
                 int total = 0;
                 for (int i = 0; i < buffers.Length; i++) total += buffers[i].Count;
                 if (_logger.IsEnabled(LogLevel.Debug))
