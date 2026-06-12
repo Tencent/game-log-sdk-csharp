@@ -216,6 +216,12 @@ internal sealed class TglogConnection
             if (_outputBufferSize > 0)
             {
                 FlushOutputBuffer();
+
+                // FlushOutputBuffer may have failed and marked the connection as Error.
+                // Do NOT accept new data on a failed connection — return -1 so the worker
+                // can fail over / rescue instead of reporting a false success.
+                if (_state != ConnectionState.Connected)
+                    return -1;
             }
 
             // If still has buffered data, check watermark and buffer the new data
@@ -314,6 +320,12 @@ internal sealed class TglogConnection
             if (_outputBufferSize > 0)
             {
                 FlushOutputBuffer();
+
+                // FlushOutputBuffer may have failed and marked the connection as Error.
+                // Do NOT accept new data on a failed connection — return -1 so the worker
+                // can fail over / rescue instead of reporting a false success.
+                if (_state != ConnectionState.Connected)
+                    return -1;
             }
 
             // Check watermark if still have buffered data
