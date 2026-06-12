@@ -800,8 +800,9 @@ internal sealed class TglogWorker
                 _logger.LogError("Worker {WorkerId}: TCP send error on {Endpoint}, trying next", _workerId, conn.Endpoint);
                 HandleConnectionError(conn, true);
                 tryCount++;
-                conn = GetConnection()!;
-                if (conn == null) break;
+                var nextConn = GetConnection();
+                if (nextConn == null) break;
+                conn = nextConn;
                 continue;
             }
 
