@@ -1516,8 +1516,11 @@ internal sealed class TglogWorker
 
     /// <summary>
     /// Fails all remaining messages (in queue, pending, and current batch) with a shutdown error.
-    /// Called as a final safety net to ensure every accepted message gets a terminal callback.
-    /// Idempotent: safe to call even if messages have already been drained.
+    /// Final safety net so that, under the documented usage contract (all Send/SendAsync
+    /// threads have stopped before Dispose/Close), every accepted message gets a terminal
+    /// callback. This does NOT cover a Send that runs concurrently with shutdown — that
+    /// scenario is explicitly outside the SDK's guarantees (callers must not send + close
+    /// concurrently). Idempotent: safe to call even if messages have already been drained.
     /// </summary>
     private void FailRemainingMessages()
     {
@@ -1544,6 +1547,9 @@ internal sealed class TglogWorker
         // the item (Volatile.Write). Poll() returns null for such slots.
         // We spin briefly when Poll() returns null but the queue reports non-empty
         // (writeIndex > readIndex), to wait for the in-flight write to complete.
+        // The bounded spin is best-effort for an in-process write that is already
+        // committed under normal operation; it is NOT meant to cover a producer
+        // racing with shutdown (send + close concurrency is outside the contract).
         LogMessage? msg;
         int failedCount = 0;
         int nullCount = 0;
