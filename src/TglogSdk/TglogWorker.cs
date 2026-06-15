@@ -202,6 +202,13 @@ internal sealed class TglogWorker
         {
             if (_connections[i].HasBufferedData) return true;
         }
+
+        // Delayed-close connections may still hold unsent output data; BuildSelectLists()
+        // keeps flushing them, so Flush() must not report "drained" while they have data.
+        for (int i = 0; i < _pendingCloseList.Count; i++)
+        {
+            if (_pendingCloseList[i].Connection.HasBufferedData) return true;
+        }
         return false;
     }
 
