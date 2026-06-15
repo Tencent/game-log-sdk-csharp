@@ -129,20 +129,24 @@ internal sealed class TglogWorker
 
     /// <summary>
     /// Enqueues a message for sending. Called from application threads.
-    /// Returns true if enqueued, false if the queue is full.
+    /// Returns <see cref="TglogErrorCode.Ok"/> if enqueued,
+    /// <see cref="TglogErrorCode.SendQueueIsFull"/> if the bounded queue is full, or
+    /// <see cref="TglogErrorCode.ProducerClosed"/> if the worker is no longer running
+    /// (closing/closed, including after a fatal exit). Distinguishing the latter lets
+    /// the caller report an accurate error instead of a misleading "queue full".
     /// </summary>
-    public bool Enqueue(LogMessage message)
+    public TglogErrorCode Enqueue(LogMessage message)
     {
         if (_state != WorkerState.Ready)
-            return false;
+            return TglogErrorCode.ProducerClosed;
 
         if (!_messageQueue.Offer(message))
         {
-            return false;
+            return TglogErrorCode.SendQueueIsFull;
         }
 
         _metrics.IncrementEnqueuedMsg();
-        return true;
+        return TglogErrorCode.Ok;
     }
 
     /// <summary>Notifies the worker of an endpoint change (called from EndpointManager thread).</summary>

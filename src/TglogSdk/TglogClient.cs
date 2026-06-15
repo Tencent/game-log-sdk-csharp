@@ -136,12 +136,11 @@ public sealed class TglogClient : IDisposable
         _metrics.IncrementRequestMsg();
 
         var worker = SelectWorker();
-        if (!worker.Enqueue(message))
+        var code = worker.Enqueue(message);
+        if (code != TglogErrorCode.Ok)
         {
             _metrics.IncrementDroppedMsg();
-            if (_closed != 0)
-                throw new TglogException(TglogErrorCode.ProducerClosed, "Client has been closed");
-            throw new TglogException(TglogErrorCode.SendQueueIsFull, "Worker queue is full");
+            throw MapEnqueueFailure(code);
         }
 
         return tcs.Task;
@@ -170,13 +169,31 @@ public sealed class TglogClient : IDisposable
         _metrics.IncrementRequestMsg();
 
         var worker = SelectWorker();
-        if (!worker.Enqueue(message))
+        var code = worker.Enqueue(message);
+        if (code != TglogErrorCode.Ok)
         {
             _metrics.IncrementDroppedMsg();
-            if (_closed != 0)
-                throw new TglogException(TglogErrorCode.ProducerClosed, "Client has been closed");
-            throw new TglogException(TglogErrorCode.SendQueueIsFull, "Worker queue is full");
+            throw MapEnqueueFailure(code);
         }
+    }
+
+    /// <summary>
+    /// Maps a non-Ok <see cref="TglogErrorCode"/> returned by <see cref="TglogWorker.Enqueue"/>
+    /// to the exception the caller should see. A full queue is reported as
+    /// <see cref="TglogErrorCode.SendQueueIsFull"/>; a worker that is closing/closed (including
+    /// after a fatal exit) is reported as <see cref="TglogErrorCode.ProducerClosed"/> so the
+    /// error is not mistaken for back-pressure.
+    /// </summary>
+    private TglogException MapEnqueueFailure(TglogErrorCode code)
+    {
+        if (code == TglogErrorCode.SendQueueIsFull)
+            return new TglogException(TglogErrorCode.SendQueueIsFull, "Worker queue is full");
+
+        // ProducerClosed: either the whole client is shutting down, or this worker
+        // stopped/exited on its own. Both mean the producer can no longer deliver.
+        return _closed != 0
+            ? new TglogException(TglogErrorCode.ProducerClosed, "Client has been closed")
+            : new TglogException(TglogErrorCode.ProducerClosed, "Worker is no longer running");
     }
 
     /// <summary>
