@@ -369,9 +369,13 @@ internal sealed class TglogWorker
 
                     if (inError)
                     {
+                        // Match runtime CheckConnectingConnections: a failed connect
+                        // marks the endpoint unavailable (backoff) and bumps error metrics.
                         _connectingConns.RemoveAt(i);
+                        MarkEndpointUnavailable(conn.Endpoint);
                         UnregisterSocket(conn);
                         conn.Close();
+                        _metrics.IncrementErrorConn(_workerId);
                     }
                     else if (inWrite)
                     {
@@ -383,8 +387,10 @@ internal sealed class TglogWorker
                         else
                         {
                             _connectingConns.RemoveAt(i);
+                            MarkEndpointUnavailable(conn.Endpoint);
                             UnregisterSocket(conn);
                             conn.Close();
+                            _metrics.IncrementErrorConn(_workerId);
                         }
                     }
                 }
@@ -405,8 +411,12 @@ internal sealed class TglogWorker
         for (int i = _connectingConns.Count - 1; i >= 0; i--)
         {
             var conn = _connectingConns[i];
+            // A connection that never completed its handshake within the init timeout is
+            // a failed connect too — penalize the endpoint and count it, like the runtime path.
+            MarkEndpointUnavailable(conn.Endpoint);
             UnregisterSocket(conn);
             conn.Close();
+            _metrics.IncrementErrorConn(_workerId);
         }
         _connectingConns.Clear();
     }
@@ -557,7 +567,7 @@ internal sealed class TglogWorker
         {
             if (_socketToConnection.TryGetValue(socket, out var conn))
             {
-                HandleConnectionError(conn, false);
+                HandleConnectionError(conn, true);
             }
         }
 
@@ -568,7 +578,7 @@ internal sealed class TglogWorker
             {
                 if (!conn.HandleRead())
                 {
-                    HandleConnectionError(conn, false);
+                    HandleConnectionError(conn, true);
                 }
             }
         }
@@ -587,7 +597,7 @@ internal sealed class TglogWorker
 
                 if (conn.State == TglogConnection.ConnectionState.Error)
                 {
-                    HandleConnectionError(conn, false);
+                    HandleConnectionError(conn, true);
                 }
             }
         }
@@ -976,9 +986,20 @@ internal sealed class TglogWorker
         }
     }
 
-    private void HandleConnectionError(TglogConnection conn, bool fromSend)
+    private void HandleConnectionError(TglogConnection conn, bool supplement)
     {
-        // Remove from active connections and stop watching network events
+        // A delayed-close connection has already been condemned (DNS removal, lifetime
+        // rotation, or a prior error). A write failure / peer close on it is expected,
+        // not a reason to penalize its endpoint or grow the pool. Only rescue its data.
+        // Marking the endpoint unavailable here could even resurrect a DNS-removed
+        // endpoint via the recovery path, so we must not do it.
+        if (RemoveFromPendingClose(conn))
+        {
+            FlushOrRescueAndClose(conn);
+            return;
+        }
+
+        // Active / connecting connection error: remove and stop watching network events
         _connections.Remove(conn);
         _connectingConns.Remove(conn);
         UnregisterSocket(conn);
@@ -992,8 +1013,26 @@ internal sealed class TglogWorker
         // Update metrics
         _metrics.IncrementErrorConn(_workerId);
 
-        // Try to supplement connection (like Java)
-        SupplementConnection();
+        // Try to supplement connection (like Java) — only for live connections
+        if (supplement)
+            SupplementConnection();
+    }
+
+    /// <summary>
+    /// Removes <paramref name="conn"/> from the delayed-close list if present.
+    /// Returns true when it was found (i.e. the connection was a pending-close one).
+    /// </summary>
+    private bool RemoveFromPendingClose(TglogConnection conn)
+    {
+        for (int i = 0; i < _pendingCloseList.Count; i++)
+        {
+            if (_pendingCloseList[i].Connection == conn)
+            {
+                _pendingCloseList.RemoveAt(i);
+                return true;
+            }
+        }
+        return false;
     }
 
     private void CloseConnectionWithDelay(TglogConnection conn, bool isError)
@@ -1051,27 +1090,37 @@ internal sealed class TglogWorker
             if (now >= dc.DeadlineTicks)
             {
                 _pendingCloseList.RemoveAt(i);
-                RescueAndCloseConnection(dc.Connection);
+                FlushOrRescueAndClose(dc.Connection);
             }
         }
     }
 
     /// <summary>
-    /// Rescues any buffered data from the connection into a healthy active connection,
-    /// then unregisters and closes it. Shared by the delayed-close path and shutdown
-    /// cleanup so both rescue before discarding buffered data.
+    /// Flushes-or-rescues a delayed-close connection, then unregisters and closes it.
+    /// Self-flush is preferred: if the connection can still write its own buffered data
+    /// we let it, preserving order and avoiding a needless cross-connection transfer.
+    /// Only data it cannot send itself (it is full, or already in Error and unable to
+    /// flush) is rescued onto a healthy active connection. Shared by the delayed-close
+    /// path, the pending-close error split, and shutdown cleanup.
     /// </summary>
-    private void RescueAndCloseConnection(TglogConnection conn)
+    private void FlushOrRescueAndClose(TglogConnection conn)
     {
-        // Try to rescue buffered data before the socket (and its buffer) is dropped.
-        RescueData(conn);
+        // 1. Self-flush first — keeps data on its original connection (ordered) and
+        //    avoids moving bytes to another connection when this one can still send.
+        if (conn.State == TglogConnection.ConnectionState.Connected && conn.HasBufferedData)
+            conn.TryFlush();
+
+        // 2. Whatever it could not send (full socket, or Error and unflushable) is
+        //    rescued onto a still-healthy active connection.
+        if (conn.HasBufferedData)
+            RescueData(conn);
 
         UnregisterSocket(conn);
         conn.Close();
         _metrics.IncrementClosedConn(_workerId);
 
         if (_logger.IsEnabled(LogLevel.Debug))
-            _logger.LogDebug($"Worker {_workerId}: rescued and closed connection: {conn.Endpoint}");
+            _logger.LogDebug($"Worker {_workerId}: flushed/rescued and closed connection: {conn.Endpoint}");
     }
 
     private void RescueData(TglogConnection closingConn)
@@ -1428,7 +1477,7 @@ internal sealed class TglogWorker
             _logger.LogDebug($"Worker {_workerId}: rescue-closing {_pendingCloseList.Count} pending delayed-close connections");
         foreach (var dc in _pendingCloseList)
         {
-            RescueAndCloseConnection(dc.Connection);
+            FlushOrRescueAndClose(dc.Connection);
         }
         _pendingCloseList.Clear();
 
