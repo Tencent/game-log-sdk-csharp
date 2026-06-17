@@ -76,10 +76,25 @@ internal sealed class TglogWorker
     private int _connectionsPerEndpoint;
     private int _endpointReplaceIndex;
 
+    // Tracks the unavailability of an endpoint: when it was (last) marked
+    // unavailable and how many recovery attempts have been made. Bundling both
+    // fields keeps the timestamp and retry count from drifting out of sync, since
+    // they always change together.
+    private struct UnavailableState
+    {
+        public long UnavailableTime;
+        public int RetryCount;
+
+        public UnavailableState(long unavailableTime)
+        {
+            UnavailableTime = unavailableTime;
+            RetryCount = 0;
+        }
+    }
+
     // Endpoints
     private List<IPEndPoint> _currentEndpoints = new();
-    private readonly Dictionary<string, long> _unavailableEndpoints = new();
-    private readonly Dictionary<string, int> _endpointRetryCount = new();
+    private readonly Dictionary<string, UnavailableState> _unavailableEndpoints = new();
 
     // Initial endpoints (set before start)
     private IReadOnlyList<IPEndPoint>? _initialEndpoints;
@@ -1180,9 +1195,9 @@ internal sealed class TglogWorker
         foreach (var kvp in _unavailableEndpoints.ToArray())
         {
             string endpointKey = kvp.Key;
-            int retryCount = _endpointRetryCount.GetValueOrDefault(endpointKey, 0);
-            long nextInterval = Backoff.EndpointRecovery.GetNextInterval(retryCount + 1);
-            long elapsed = now - kvp.Value;
+            var ustate = kvp.Value;
+            long nextInterval = Backoff.EndpointRecovery.GetNextInterval(ustate.RetryCount + 1);
+            long elapsed = now - ustate.UnavailableTime;
 
             if (elapsed >= nextInterval)
             {
@@ -1196,10 +1211,11 @@ internal sealed class TglogWorker
                         initiatedConns++;
                 }
 
-                if (_unavailableEndpoints.ContainsKey(endpointKey))
+                if (_unavailableEndpoints.TryGetValue(endpointKey, out var current))
                 {
-                    _endpointRetryCount[endpointKey] = retryCount + 1;
-                    _unavailableEndpoints[endpointKey] = now;
+                    current.RetryCount = ustate.RetryCount + 1;
+                    current.UnavailableTime = now;
+                    _unavailableEndpoints[endpointKey] = current;
                 }
 
                 if (initiatedConns == 0)
@@ -1379,7 +1395,6 @@ internal sealed class TglogWorker
             }
 
             _unavailableEndpoints.Remove(key);
-            _endpointRetryCount.Remove(key);
             _metrics.IncrementRemoveEndpoint();
         }
 
@@ -1652,8 +1667,7 @@ internal sealed class TglogWorker
 
         if (!_unavailableEndpoints.ContainsKey(key))
         {
-            _unavailableEndpoints[key] = Environment.TickCount64;
-            _endpointRetryCount[key] = 0;
+            _unavailableEndpoints[key] = new UnavailableState(Environment.TickCount64);
             _logger.LogWarning("Worker {WorkerId}: marked endpoint unavailable: {Key}", _workerId, key);
         }
     }
@@ -1663,7 +1677,6 @@ internal sealed class TglogWorker
         string key = GetEndpointKey(endpoint);
         if (_unavailableEndpoints.Remove(key))
         {
-            _endpointRetryCount.Remove(key);
             _logger.LogInformation("Worker {WorkerId}: endpoint recovered: {Endpoint}", _workerId, endpoint);
         }
     }
