@@ -179,7 +179,7 @@ public sealed class TglogConfig
     /// Validates configuration parameters. Required endpoint fields still throw;
     /// invalid optional values are reset to their defaults.
     /// </summary>
-    internal void Validate()
+    internal void Validate(ILogger? logger = null)
     {
         if (string.IsNullOrWhiteSpace(Host))
             throw new TglogException(TglogErrorCode.BadFlag, "Host cannot be null or empty");
@@ -220,7 +220,10 @@ public sealed class TglogConfig
         // Auto-adjust batching max size to fit within protocol limits
         if (BatchingMaxSize > MaxRequestSize)
         {
+            int original = BatchingMaxSize;
             BatchingMaxSize = MaxRequestSize;
+            logger?.LogWarning("Batching max size ({Original}) exceeds protocol limit ({MaxRequestSize}), adjusting to {Adjusted}",
+                original, MaxRequestSize, BatchingMaxSize);
         }
     }
 }

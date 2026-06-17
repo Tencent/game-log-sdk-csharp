@@ -57,22 +57,28 @@ public sealed class TglogClient : IDisposable
     public TglogClient(TglogConfig config)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
-        _config.Validate();
 
-        // Setup logger factory
+        // Setup logger factory (needed by Validate for warnings)
         _loggerFactory = config.LoggerFactory
             ?? NullLoggerFactory.Instance;
         _logger = _loggerFactory.CreateLogger("TGLog.Client");
 
+        _config.Validate(_logger);
+
         _metrics = new TglogMetrics(config.WorkerNum, config.PrometheusRegistry);
-        _endpointManager = new EndpointManager(config, _loggerFactory);
-        _workers = new TglogWorker[config.WorkerNum];
 
         // From this point on, any failure must unregister metrics to keep
         // the shared CollectorRegistry clean for retry / recreation.
         bool initSucceeded = false;
         try
         {
+            _endpointManager = new EndpointManager(config, _loggerFactory);
+            _workers = new TglogWorker[config.WorkerNum];
+            for (int i = 0; i < _workers.Length; i++)
+            {
+                _workers[i] = new TglogWorker(i, _config, _metrics, _loggerFactory);
+            }
+
             Start();
             initSucceeded = true;
         }
@@ -80,11 +86,9 @@ public sealed class TglogClient : IDisposable
         {
             if (!initSucceeded)
             {
-                try { _endpointManager.Dispose(); }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning("Failed to dispose endpoint manager during construction cleanup: {Message}", ex.Message);
-                }
+                // start() already stops any workers/endpointManager it started,
+                // but nothing releases metrics. Do that here so a failed
+                // construction doesn't leak collectors in the shared registry.
                 try { _metrics.Unregister(); }
                 catch (Exception ex)
                 {
@@ -312,34 +316,31 @@ public sealed class TglogClient : IDisposable
 
     private void Start()
     {
-        // Start endpoint manager and resolve initial endpoints
-        _endpointManager.AddChangeListener(OnEndpointsChanged);
-        _endpointManager.Start();
-
-        var initialEndpoints = _endpointManager.CurrentEndpoints;
-        if (initialEndpoints.Count == 0)
-        {
-            throw new TglogException(TglogErrorCode.NewConnFailed,
-                $"No endpoints resolved for {_config.Host}:{_config.Port}");
-        }
-
-        _metrics.SetEndpointCount(initialEndpoints.Count);
-
-        // Auto-adjust batching max size based on protocol limits
-        if (_config.BatchingMaxSize > _config.MaxRequestSize)
-        {
-            _logger.LogWarning("Batching max size ({BatchingMaxSize}) exceeds protocol limit ({MaxRequestSize}), adjusting", _config.BatchingMaxSize, _config.MaxRequestSize);
-        }
-
+        bool endpointManagerStarted = false;
+        var startedWorkers = new List<TglogWorker>(_workers.Length);
         int waitTimeout = _config.ConnectionTimeoutMs * 2;
 
         try
         {
-            // Create and start workers
+            // Start endpoint manager and resolve initial endpoints
+            _endpointManager.Start();
+            endpointManagerStarted = true;
+            _endpointManager.AddChangeListener(OnEndpointsChanged);
+
+            var initialEndpoints = _endpointManager.CurrentEndpoints;
+            if (initialEndpoints.Count == 0)
+            {
+                throw new TglogException(TglogErrorCode.NewConnFailed,
+                    $"No endpoints resolved for {_config.Host}:{_config.Port}");
+            }
+
+            _metrics.SetEndpointCount(initialEndpoints.Count);
+
+            // Start workers
             for (int i = 0; i < _workers.Length; i++)
             {
-                _workers[i] = new TglogWorker(i, _config, _metrics, _loggerFactory);
                 _workers[i].SetInitialEndpoints(initialEndpoints);
+                startedWorkers.Add(_workers[i]);
                 _workers[i].Start();
             }
 
@@ -348,38 +349,49 @@ public sealed class TglogClient : IDisposable
             {
                 if (!worker.WaitForReady(waitTimeout))
                 {
-                    // A worker failed to become ready — abort startup
                     _logger.LogError("Worker failed to become ready within {TimeoutMs}ms, aborting startup", waitTimeout);
                     throw new TglogException(TglogErrorCode.NewConnFailed,
                         "One or more workers failed to become ready");
                 }
             }
+
+            _running = 1;
+
+            _logger.LogInformation("Client created: {Protocol}://{Host}:{Port} (workers={WorkerCount}, endpoints={EndpointCount})", _config.TransportProtocol, _config.Host, _config.Port, _workers.Length, initialEndpoints.Count);
         }
-        catch
+        catch (Exception ex)
         {
-            // Any failure during worker creation/start/ready-wait must stop and join
-            // every worker that was already started, so no background threads leak.
-            foreach (var w in _workers)
+            _logger.LogError(ex, "Failed to start client, cleaning up resources");
+
+            foreach (var worker in startedWorkers)
             {
-                if (w != null)
+                try
                 {
-                    try
-                    {
-                        w.Stop();
-                        w.Join(waitTimeout);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning("Failed to stop worker during startup rollback: {Message}", ex.Message);
-                    }
+                    worker.Stop();
+                    worker.Join(waitTimeout);
+                }
+                catch (Exception stopEx)
+                {
+                    _logger.LogWarning("Failed to stop worker during startup rollback: {Message}", stopEx.Message);
                 }
             }
-            throw;
+
+            if (endpointManagerStarted)
+            {
+                try { _endpointManager.Stop(); }
+                catch (Exception stopEx)
+                {
+                    _logger.LogWarning("Failed to stop endpoint manager during startup rollback: {Message}", stopEx.Message);
+                }
+            }
+
+            _running = 0;
+
+            if (ex is TglogException tglogException)
+                throw new TglogException(tglogException.ErrorCode, "Failed to start client", tglogException);
+
+            throw new TglogException(TglogErrorCode.NewConnFailed, "Failed to start client", ex);
         }
-
-        _running = 1;
-
-        _logger.LogInformation("Client created: {Protocol}://{Host}:{Port} (workers={WorkerCount}, endpoints={EndpointCount})", _config.TransportProtocol, _config.Host, _config.Port, _workers.Length, initialEndpoints.Count);
     }
 
     private void OnEndpointsChanged(IReadOnlyList<System.Net.IPEndPoint> newEndpoints)
