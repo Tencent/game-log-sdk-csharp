@@ -151,7 +151,8 @@ internal sealed class TglogConnection
     }
 
     /// <summary>
-    /// Completes a pending TCP connection (called when Select indicates writable).
+    /// Completes a pending TCP connection after Socket.Select reports it writable.
+    /// Do not call this as a polling check or from timeout cleanup.
     /// Returns true if connected successfully.
     /// </summary>
     public bool FinishConnect()
@@ -169,7 +170,7 @@ internal sealed class TglogConnection
                     if (errorCode != 0)
                     {
                         _logger.LogWarning("FinishConnect error for {Endpoint}: socket error {ErrorCode}", _endpoint, errorCode);
-                        _state = ConnectionState.Error;
+                        MarkConnectFailed();
                         return false;
                     }
                 }
@@ -190,9 +191,16 @@ internal sealed class TglogConnection
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to finish connection to {Endpoint}", _endpoint);
-            _state = ConnectionState.Error;
+            MarkConnectFailed();
             return false;
         }
+    }
+
+    internal void MarkConnectFailed()
+    {
+        _state = ConnectionState.Error;
+        _retryCount++;
+        _lastRetryAttemptTicks = Environment.TickCount64;
     }
 
     /// <summary>

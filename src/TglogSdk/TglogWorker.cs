@@ -357,43 +357,8 @@ internal sealed class TglogWorker
             try
             {
                 Socket.Select(null, checkWrite, checkError, 100_000); // 100ms
-
-                // Process results
-                for (int i = _connectingConns.Count - 1; i >= 0; i--)
-                {
-                    var conn = _connectingConns[i];
-                    if (conn.Socket == null) continue;
-
-                    bool inError = checkError.Contains(conn.Socket);
-                    bool inWrite = checkWrite.Contains(conn.Socket);
-
-                    if (inError)
-                    {
-                        // Match runtime CheckConnectingConnections: a failed connect
-                        // marks the endpoint unavailable (backoff) and bumps error metrics.
-                        _connectingConns.RemoveAt(i);
-                        MarkEndpointUnavailable(conn.Endpoint);
-                        UnregisterSocket(conn);
-                        conn.Close();
-                        _metrics.IncrementErrorConn(_workerId);
-                    }
-                    else if (inWrite)
-                    {
-                        if (conn.FinishConnect())
-                        {
-                            _connectingConns.RemoveAt(i);
-                            _connections.Add(conn);
-                        }
-                        else
-                        {
-                            _connectingConns.RemoveAt(i);
-                            MarkEndpointUnavailable(conn.Endpoint);
-                            UnregisterSocket(conn);
-                            conn.Close();
-                            _metrics.IncrementErrorConn(_workerId);
-                        }
-                    }
-                }
+                ProcessSelectedConnectingSockets(checkWrite, checkError);
+                CheckConnectingConnections();
             }
             catch (Exception ex)
             {
@@ -402,7 +367,6 @@ internal sealed class TglogWorker
             }
         }
 
-        // Timeout: close remaining connecting connections
         if (_connectingConns.Count > 0)
         {
             _logger.LogWarning("Worker {WorkerId}: {Count} connections timed out during initialization", _workerId, _connectingConns.Count);
@@ -411,14 +375,11 @@ internal sealed class TglogWorker
         for (int i = _connectingConns.Count - 1; i >= 0; i--)
         {
             var conn = _connectingConns[i];
-            // A connection that never completed its handshake within the init timeout is
-            // a failed connect too — penalize the endpoint and count it, like the runtime path.
-            MarkEndpointUnavailable(conn.Endpoint);
-            UnregisterSocket(conn);
-            conn.Close();
-            _metrics.IncrementErrorConn(_workerId);
+            if (conn.IsConnecting)
+                conn.MarkConnectFailed();
         }
-        _connectingConns.Clear();
+
+        CheckConnectingConnections();
     }
 
     // ==================== Event Loop ====================
@@ -567,6 +528,12 @@ internal sealed class TglogWorker
         {
             if (_socketToConnection.TryGetValue(socket, out var conn))
             {
+                if (conn.IsConnecting)
+                {
+                    conn.MarkConnectFailed();
+                    continue;
+                }
+
                 HandleConnectionError(conn, true);
             }
         }
@@ -590,9 +557,13 @@ internal sealed class TglogWorker
             {
                 if (conn.IsConnecting)
                 {
-                    // Already handled in CheckConnectingConnections
+                    conn.FinishConnect();
                     continue;
                 }
+
+                if (conn.State == TglogConnection.ConnectionState.Error)
+                    continue;
+
                 conn.TryFlush();
 
                 if (conn.State == TglogConnection.ConnectionState.Error)
@@ -603,45 +574,45 @@ internal sealed class TglogWorker
         }
     }
 
+    private void ProcessSelectedConnectingSockets(List<Socket> selectedWrite, List<Socket> selectedError)
+    {
+        foreach (var socket in selectedError)
+        {
+            if (_socketToConnection.TryGetValue(socket, out var conn) && conn.IsConnecting)
+            {
+                conn.MarkConnectFailed();
+            }
+        }
+
+        foreach (var socket in selectedWrite)
+        {
+            if (_socketToConnection.TryGetValue(socket, out var conn) && conn.IsConnecting)
+            {
+                conn.FinishConnect();
+            }
+        }
+    }
+
     private void CheckConnectingConnections()
     {
         for (int i = _connectingConns.Count - 1; i >= 0; i--)
         {
             var conn = _connectingConns[i];
-            if (conn.Socket == null)
+
+            if (conn.State == TglogConnection.ConnectionState.Connected)
             {
                 _connectingConns.RemoveAt(i);
-                UnregisterSocket(conn);
-                continue;
+                _connections.Add(conn);
+                ClearEndpointUnavailable(conn.Endpoint);
+                _logger.LogInformation("Worker {WorkerId}: connection ready: {Endpoint} (total: {Count})", _workerId, conn.Endpoint, _connections.Count);
             }
-
-            // Check if connection completed (socket was in write list)
-            if (_selectWriteList.Contains(conn.Socket) || _selectErrorList.Contains(conn.Socket))
+            else if (conn.State == TglogConnection.ConnectionState.Error || conn.Socket == null)
             {
-                if (_selectErrorList.Contains(conn.Socket))
-                {
-                    _connectingConns.RemoveAt(i);
-                    MarkEndpointUnavailable(conn.Endpoint);
-                    UnregisterSocket(conn);
-                    conn.Close();
-                    _metrics.IncrementErrorConn(_workerId);
-                    continue;
-                }
-
-                if (conn.FinishConnect())
-                {
-                    _connectingConns.RemoveAt(i);
-                    _connections.Add(conn);
-                    _logger.LogInformation("Worker {WorkerId}: connection ready: {Endpoint} (total: {Count})", _workerId, conn.Endpoint, _connections.Count);
-                }
-                else
-                {
-                    _connectingConns.RemoveAt(i);
-                    MarkEndpointUnavailable(conn.Endpoint);
-                    UnregisterSocket(conn);
-                    conn.Close();
-                    _metrics.IncrementErrorConn(_workerId);
-                }
+                _connectingConns.RemoveAt(i);
+                MarkEndpointUnavailable(conn.Endpoint);
+                UnregisterSocket(conn);
+                conn.Close();
+                _metrics.IncrementErrorConn(_workerId);
             }
         }
     }
@@ -972,6 +943,7 @@ internal sealed class TglogWorker
             if (conn.IsConnected)
             {
                 _connections.Add(conn);
+                ClearEndpointUnavailable(conn.Endpoint);
             }
             else if (conn.IsConnecting)
             {
@@ -1203,10 +1175,9 @@ internal sealed class TglogWorker
     {
         if (_unavailableEndpoints.Count == 0) return;
 
-        var toRemove = new List<string>();
         long now = Environment.TickCount64;
 
-        foreach (var kvp in _unavailableEndpoints)
+        foreach (var kvp in _unavailableEndpoints.ToArray())
         {
             string endpointKey = kvp.Key;
             int retryCount = _endpointRetryCount.GetValueOrDefault(endpointKey, 0);
@@ -1218,31 +1189,24 @@ internal sealed class TglogWorker
                 var endpoint = ParseEndpointKey(endpointKey);
                 if (endpoint == null) continue;
 
-                bool success = false;
+                int initiatedConns = 0;
                 for (int i = 0; i < _connectionsPerEndpoint; i++)
                 {
                     if (CreateConnection(endpoint) != null)
-                        success = true;
+                        initiatedConns++;
                 }
 
-                if (success)
-                {
-                    toRemove.Add(endpointKey);
-                    if (_logger.IsEnabled(LogLevel.Debug))
-                        _logger.LogDebug($"Worker {_workerId}: recovered endpoint {endpointKey}");
-                }
-                else
+                if (_unavailableEndpoints.ContainsKey(endpointKey))
                 {
                     _endpointRetryCount[endpointKey] = retryCount + 1;
                     _unavailableEndpoints[endpointKey] = now;
                 }
-            }
-        }
 
-        foreach (var key in toRemove)
-        {
-            _unavailableEndpoints.Remove(key);
-            _endpointRetryCount.Remove(key);
+                if (initiatedConns == 0)
+                {
+                    _logger.LogWarning("Worker {WorkerId}: failed to initiate any recovery connection for {Endpoint}", _workerId, endpointKey);
+                }
+            }
         }
     }
 
@@ -1691,6 +1655,16 @@ internal sealed class TglogWorker
             _unavailableEndpoints[key] = Environment.TickCount64;
             _endpointRetryCount[key] = 0;
             _logger.LogWarning("Worker {WorkerId}: marked endpoint unavailable: {Key}", _workerId, key);
+        }
+    }
+
+    private void ClearEndpointUnavailable(IPEndPoint endpoint)
+    {
+        string key = GetEndpointKey(endpoint);
+        if (_unavailableEndpoints.Remove(key))
+        {
+            _endpointRetryCount.Remove(key);
+            _logger.LogInformation("Worker {WorkerId}: endpoint recovered: {Endpoint}", _workerId, endpoint);
         }
     }
 
