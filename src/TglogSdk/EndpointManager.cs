@@ -40,14 +40,10 @@ internal sealed class EndpointManager : IDisposable
     /// <summary>Starts the endpoint manager: performs initial resolution and begins periodic updates.</summary>
     public void Start()
     {
-        // Initial resolution (synchronous)
-        UpdateEndpoints();
+        // Initial resolution (synchronous) — failures propagate so startup reports the real cause.
+        _currentEndpoints = ResolveHost();
 
-        if (_currentEndpoints.Count == 0)
-        {
-            throw new TglogException(TglogErrorCode.NewConnFailed,
-                $"Failed to resolve host: {_host}");
-        }
+        _logger.LogInformation("Initial DNS resolution for {Host} -> {Count} endpoint(s)", _host, _currentEndpoints.Count);
 
         // Start periodic DNS updates
         var interval = TimeSpan.FromSeconds(_config.DnsUpdateIntervalSec);
