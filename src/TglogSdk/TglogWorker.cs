@@ -937,7 +937,19 @@ internal sealed class TglogWorker
     {
         if (_connections.Count == 0)
         {
-            SupplementConnection();
+            // Throttle emergency supplement attempts (matching Java getConnection):
+            // a worker with no usable connections must not try to (re)connect on every
+            // single send. Reuse the same timestamp the event-loop emergency-supplement
+            // check updates so both paths share one cooldown window.
+            long now = Environment.TickCount64;
+            long elapsed = now - _lastEmergencySupplementTime;
+            if (elapsed >= EmergencySupplementMinIntervalMs)
+            {
+                _logger.LogInformation("Worker {WorkerId}: emergency supplement connections, elapsed: {Elapsed}ms", _workerId, elapsed);
+                SupplementConnection();
+                _lastEmergencySupplementTime = now;
+            }
+
             if (_connections.Count == 0)
             {
                 _logger.LogError("Worker {WorkerId}: no available connections", _workerId);
