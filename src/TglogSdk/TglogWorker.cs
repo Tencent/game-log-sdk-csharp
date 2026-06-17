@@ -357,33 +357,19 @@ internal sealed class TglogWorker
     {
         long deadline = Environment.TickCount64 + timeoutMs;
 
+        // Reuse the steady-state select machinery (BuildSelectLists / DoSelect /
+        // ProcessSelectResults / CheckConnectingConnections) instead of a bespoke
+        // select path. During init _connections/_pendingCloseList/_messageQueue are
+        // empty, so these methods only watch the connecting sockets — finishing or
+        // failing handshakes exactly as the event loop would. This mirrors the Java
+        // SDK, where waitForInitialConnections and runEventLoop share one selector
+        // and processSelectionKeys().
         while (_connectingConns.Count > 0 && Environment.TickCount64 < deadline)
         {
-            var checkWrite = new List<Socket>(_connectingConns.Count);
-            var checkError = new List<Socket>(_connectingConns.Count);
-
-            foreach (var conn in _connectingConns)
-            {
-                if (conn.Socket != null)
-                {
-                    checkWrite.Add(conn.Socket);
-                    checkError.Add(conn.Socket);
-                }
-            }
-
-            if (checkWrite.Count == 0) break;
-
-            try
-            {
-                Socket.Select(null, checkWrite, checkError, 100_000); // 100ms
-                ProcessSelectedConnectingSockets(checkWrite, checkError);
-                CheckConnectingConnections();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning("Worker {WorkerId}: WaitForConnecting error: {Message}", _workerId, ex.Message);
-                break;
-            }
+            BuildSelectLists();
+            DoSelect(10_000); // 10ms, same as the idle event-loop timeout
+            ProcessSelectResults();
+            CheckConnectingConnections();
         }
 
         if (_connectingConns.Count > 0)
@@ -589,25 +575,6 @@ internal sealed class TglogWorker
                 {
                     HandleConnectionError(conn, true);
                 }
-            }
-        }
-    }
-
-    private void ProcessSelectedConnectingSockets(List<Socket> selectedWrite, List<Socket> selectedError)
-    {
-        foreach (var socket in selectedError)
-        {
-            if (_socketToConnection.TryGetValue(socket, out var conn) && conn.IsConnecting)
-            {
-                conn.MarkConnectFailed();
-            }
-        }
-
-        foreach (var socket in selectedWrite)
-        {
-            if (_socketToConnection.TryGetValue(socket, out var conn) && conn.IsConnecting)
-            {
-                conn.FinishConnect();
             }
         }
     }
@@ -970,23 +937,19 @@ internal sealed class TglogWorker
         var conn = new TglogConnection(endpoint, _config, _metrics, _workerId, _logger);
         if (conn.Connect())
         {
+            // Always register the new connection in _connectingConns, regardless of
+            // whether Connect() completed synchronously (UDP / loopback TCP) or is
+            // still in progress (normal TCP). Promotion into _connections and clearing
+            // the endpoint's unavailable state happen in exactly one place —
+            // CheckConnectingConnections — keeping that logic cohesive and matching
+            // the Java SDK's createConnection/checkConnectingConnections split.
             RegisterSocket(conn);
-            if (conn.IsConnected)
-            {
-                _connections.Add(conn);
-                ClearEndpointUnavailable(conn.Endpoint);
-            }
-            else if (conn.IsConnecting)
-            {
-                _connectingConns.Add(conn);
-            }
+            _connectingConns.Add(conn);
             return conn;
         }
-        else
-        {
-            _metrics.IncrementErrorConn(_workerId);
-            return null;
-        }
+
+        _metrics.IncrementErrorConn(_workerId);
+        return null;
     }
 
     private void HandleConnectionError(TglogConnection conn, bool supplement)
