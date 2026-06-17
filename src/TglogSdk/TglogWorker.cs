@@ -590,11 +590,39 @@ internal sealed class TglogWorker
                 _connectingConns.RemoveAt(i);
                 _connections.Add(conn);
                 ClearEndpointUnavailable(conn.Endpoint);
+
+                // If this connection was created to replace an expired one, the
+                // replacement is now usable: retire the old connection (delayed close
+                // so its buffered data can still drain) and clear the reference. If the
+                // old connection already errored out while this one was still connecting,
+                // it is no longer in _connections and Remove returns false, so we simply
+                // skip retiring it.
+                var replacedConn = conn.ReplacingConn;
+                if (replacedConn != null)
+                {
+                    if (_connections.Remove(replacedConn))
+                    {
+                        _logger.LogInformation("Worker {WorkerId}: replacement ready, retiring expired connection: {Endpoint}", _workerId, replacedConn.Endpoint);
+                        CloseConnectionWithDelay(replacedConn, false);
+                    }
+                    conn.ReplacingConn = null;
+                }
+
                 _logger.LogInformation("Worker {WorkerId}: connection ready: {Endpoint} (total: {Count})", _workerId, conn.Endpoint, _connections.Count);
             }
             else if (conn.State == TglogConnection.ConnectionState.Error || conn.Socket == null)
             {
                 _connectingConns.RemoveAt(i);
+
+                // If this was a replacement attempt, it failed: drop the reference and
+                // keep the old (expired) connection serving. The next replace cycle will
+                // retry; meanwhile the endpoint does not lose a usable connection.
+                if (conn.ReplacingConn != null)
+                {
+                    _logger.LogWarning("Worker {WorkerId}: replacement connection failed, keeping expired connection alive: {Endpoint}", _workerId, conn.Endpoint);
+                    conn.ReplacingConn = null;
+                }
+
                 MarkEndpointUnavailable(conn.Endpoint);
                 UnregisterSocket(conn);
                 conn.Close();
@@ -970,6 +998,20 @@ internal sealed class TglogWorker
         _connectingConns.Remove(conn);
         UnregisterSocket(conn);
 
+        // If this connection was an in-flight replacement that just failed, drop its
+        // reference to the old (expired) connection so the latter keeps serving and is
+        // eligible to be replaced again on the next cycle.
+        //
+        // If this connection is instead an OLD connection that some in-flight replacement
+        // points at (it broke before its replacement finished connecting), no action is
+        // needed: it was just removed from _connections above, so when the replacement
+        // reaches Connected its _connections.Remove(old) returns false and retiring is skipped.
+        if (conn.ReplacingConn != null)
+        {
+            _logger.LogWarning("Worker {WorkerId}: in-flight replacement connection errored, keeping expired connection alive: {Endpoint}", _workerId, conn.Endpoint);
+            conn.ReplacingConn = null;
+        }
+
         // Mark endpoint unavailable (like Java)
         MarkEndpointUnavailable(conn.Endpoint);
 
@@ -1134,7 +1176,22 @@ internal sealed class TglogWorker
 
     /// <summary>
     /// Replaces a connection using round-robin endpoint selection (matching Java).
-    /// Tries each available endpoint to create a new connection, then closes the old one.
+    /// <para>
+    /// The old connection is NOT removed or closed here. A non-blocking
+    /// <see cref="TglogConnection.Connect"/> on a TCP socket only initiates the
+    /// handshake; the new connection is not usable until
+    /// <see cref="CheckConnectingConnections"/> observes it as Connected. Removing the
+    /// old connection now would shrink the usable pool for the whole handshake window
+    /// (and, in the worst case, leave the worker with zero usable connections and
+    /// trigger an unnecessary emergency supplement).
+    /// </para>
+    /// <para>
+    /// Instead the new connection records a reference to the old one it will replace
+    /// (<see cref="TglogConnection.ReplacingConn"/>). When the new connection reaches
+    /// Connected, <see cref="CheckConnectingConnections"/> schedules the old one for
+    /// delayed close. If the new connection fails to connect, the reference is dropped
+    /// and the old (expired) connection keeps serving until the next replace cycle.
+    /// </para>
     /// </summary>
     private void ReplaceConnection(TglogConnection oldConn, int oldConnIndex)
     {
@@ -1151,9 +1208,9 @@ internal sealed class TglogWorker
             var newConn = CreateConnection(endpoint);
             if (newConn != null)
             {
-                // Remove old connection from active list
-                _connections.Remove(oldConn);
-                CloseConnectionWithDelay(oldConn, false);
+                // Defer removing/closing the old connection until the new one is
+                // actually Connected (handled in CheckConnectingConnections).
+                newConn.ReplacingConn = oldConn;
                 return;
             }
             else
@@ -1378,6 +1435,10 @@ internal sealed class TglogWorker
                 {
                     var conn = _connectingConns[i];
                     _connectingConns.RemoveAt(i);
+                    // If this connecting socket was an in-flight replacement, drop its
+                    // reference so we don't try to retire an old connection on behalf of a
+                    // replacement that no longer exists.
+                    conn.ReplacingConn = null;
                     UnregisterSocket(conn);
                     conn.Close();
                     _metrics.IncrementClosedConn(_workerId);

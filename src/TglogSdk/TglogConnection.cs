@@ -96,6 +96,16 @@ internal sealed class TglogConnection
     public int RetryCount => _retryCount;
 
     /// <summary>
+    /// When this connection was created to replace an expired connection, holds a
+    /// reference to the old connection it should retire once this one reaches
+    /// <see cref="ConnectionState.Connected"/>. The old connection keeps serving
+    /// throughout the handshake window and is only scheduled for delayed close once
+    /// the replacement is actually usable. Cleared after retirement, or dropped if
+    /// the replacement fails to connect (so the old connection keeps serving).
+    /// </summary>
+    public TglogConnection? ReplacingConn { get; set; }
+
+    /// <summary>
     /// Initiates a non-blocking connection.
     /// For TCP: enters Connecting state, connection completes asynchronously.
     /// For UDP: enters Connected state immediately (UDP is connectionless).
