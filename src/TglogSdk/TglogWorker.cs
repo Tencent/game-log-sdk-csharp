@@ -1324,6 +1324,17 @@ internal sealed class TglogWorker
 
     private void HandleEndpointUpdate(IReadOnlyList<IPEndPoint> newEndpoints)
     {
+        // Ignore empty/null updates. Applying them would wipe currentEndpoints and
+        // close every connection, leaving the worker with nowhere to send. An empty
+        // endpoint list almost always means a transient DNS resolution failure rather
+        // than a genuine "no servers" topology, so keep the existing endpoints.
+        if (newEndpoints == null || newEndpoints.Count == 0)
+        {
+            _logger.LogWarning("Worker {WorkerId}: ignoring empty endpoint update, keeping {Count} current endpoints",
+                _workerId, _currentEndpoints.Count);
+            return;
+        }
+
         _logger.LogInformation("Worker {WorkerId}: processing endpoint update: {Count} endpoints", _workerId, newEndpoints.Count);
 
         var oldSet = new HashSet<string>(_currentEndpoints.Select(GetEndpointKey));
