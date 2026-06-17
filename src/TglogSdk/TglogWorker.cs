@@ -304,14 +304,18 @@ internal sealed class TglogWorker
     {
         if (_initialEndpoints == null || _initialEndpoints.Count == 0)
         {
-            _logger.LogWarning("Worker {WorkerId}: no initial endpoints", _workerId);
-            return;
+            // Mirror the Java SDK: a worker with no initial endpoints cannot send
+            // anything, so fail startup instead of silently reaching Ready state.
+            // Throwing here makes WaitForReady() return false and the client
+            // constructor fail, rather than producing a worker that drops all sends.
+            throw new TglogException(TglogErrorCode.NewConnFailed,
+                $"Worker {_workerId}: no initial endpoints provided");
         }
 
         _logger.LogInformation("Worker {WorkerId}: initializing connections, endpoints={EndpointCount}", _workerId, _initialEndpoints.Count);
 
         _currentEndpoints = new List<IPEndPoint>(_initialEndpoints);
-        _connectionsPerEndpoint = _currentEndpoints.Count <= 2 ? 2 : 1;
+        _connectionsPerEndpoint = _currentEndpoints.Count <= 2 ? 3 : 2;
 
         foreach (var endpoint in _currentEndpoints)
         {
