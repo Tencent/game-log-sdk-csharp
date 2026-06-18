@@ -495,10 +495,18 @@ internal sealed class TglogWorker
             }
         }
 
-        // Also check non-error delayed close connections for writability
+        // Non-error delayed-close connections are still live sockets: keep watching
+        // readability to detect peer close promptly, and writability to drain buffered data.
         foreach (var dc in _pendingCloseList)
         {
-            if (!dc.IsError && dc.Connection.Socket != null && dc.Connection.HasBufferedData)
+            if (dc.IsError || dc.Connection.Socket == null) continue;
+
+            if (_config.TransportProtocol == TglogConfig.Protocol.Tcp)
+            {
+                _selectReadList.Add(dc.Connection.Socket);
+            }
+
+            if (dc.Connection.HasBufferedData)
             {
                 _selectWriteList.Add(dc.Connection.Socket);
             }
