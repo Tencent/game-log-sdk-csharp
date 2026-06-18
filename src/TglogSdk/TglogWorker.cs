@@ -341,10 +341,11 @@ internal sealed class TglogWorker
             WaitForConnectingConnections(_config.ConnectionTimeoutMs);
         }
 
-        // TCP requires at least one established connection to be useful.
-        // If all connection attempts failed, abort worker startup so that
-        // WaitForReady() returns false and the client constructor fails.
-        if (_config.TransportProtocol == TglogConfig.Protocol.Tcp && _connections.Count == 0)
+        // At least one established connection is required for either protocol.
+        // TCP can fail during the handshake; UDP can fail while creating or
+        // connecting the socket. Match the Java SDK's awaitReady() semantics by
+        // aborting startup when no initial connection becomes usable.
+        if (_connections.Count == 0)
         {
             throw new TglogException(TglogErrorCode.NewConnFailed,
                 $"Worker {_workerId}: no connections established during initialization");
