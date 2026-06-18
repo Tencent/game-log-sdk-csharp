@@ -489,6 +489,7 @@ internal sealed class TglogWorker
             {
                 _selectReadList.Add(conn.Socket); // Monitor for peer close
             }
+            _selectErrorList.Add(conn.Socket);
             if (conn.HasBufferedData)
             {
                 _selectWriteList.Add(conn.Socket); // Has data to flush
@@ -505,6 +506,8 @@ internal sealed class TglogWorker
             {
                 _selectReadList.Add(dc.Connection.Socket);
             }
+
+            _selectErrorList.Add(dc.Connection.Socket);
 
             if (dc.Connection.HasBufferedData)
             {
