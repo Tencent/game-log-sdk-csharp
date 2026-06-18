@@ -21,15 +21,34 @@ internal struct PaddedLong
 /// - Multiple threads may call <see cref="Offer"/> concurrently (producers).
 /// - Only ONE thread may call <see cref="Poll"/> (the consumer/worker thread).
 ///
-/// Implementation uses a power-of-2 ring buffer with atomic CAS for producers
-/// and simple volatile writes for the single consumer. Cache-line padding prevents
-/// false sharing between producer and consumer indices.
+/// This implementation uses the Disruptor-style per-slot sequence pattern so that
+/// the consumer never has to guess whether a slot is "empty" or merely "claimed
+/// but not yet filled". Each slot carries a sequence number that the producer
+/// publishes (with release semantics) only AFTER the item has been stored. The
+/// consumer reads the sequence (with acquire semantics) and only consumes a slot
+/// whose sequence matches the expected value.
+///
+/// Why the previous CAS-claim-then-write design was unsafe:
+/// - A producer would CAS _writeIndex first and write the item afterwards. That
+///   left a window where _writeIndex had advanced but the slot was still null.
+/// - The consumer used "slot == null" to decide the queue was empty, which is
+///   indistinguishable from a slot that is genuinely empty. A single slow
+///   producer could therefore stall delivery of every message behind it
+///   (head-of-line blocking), and the size/full checks relied on cross-thread
+///   index visibility that does not hold without the sequence handshake.
+///
+/// Cache-line padding prevents false sharing between _writeIndex and _readIndex.
 /// </summary>
 internal sealed class LockFreeQueue<T> where T : class
 {
     private readonly int _capacity;
     private readonly int _mask;
     private readonly T?[] _buffer;
+
+    // Per-slot publication sequence. A slot at array index i is "ready to be
+    // consumed for ticket number n" iff _sequence[i] == n + 1.
+    // Initialized so that slot i is ready to be CLAIMED (written) for ticket i.
+    private readonly long[] _sequence;
 
     // Cache-line padded indices to prevent false sharing.
     // Producers CAS on _writeIndex; the single consumer writes _readIndex.
@@ -39,16 +58,20 @@ internal sealed class LockFreeQueue<T> where T : class
 
     /// <summary>
     /// Creates a new lock-free queue with the given capacity.
-    /// Capacity is rounded up to the next power of 2 for efficient modulo via bitwise AND.
+    /// Capacity is rounded up to the next power of 2 (minimum 2) for efficient modulo via bitwise AND.
     /// </summary>
     public LockFreeQueue(int capacity)
     {
         if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity), "Capacity must be >= 1");
 
-        // Round up to next power of 2
+        // Round up to next power of 2 (minimum 2)
         _capacity = NextPowerOf2(capacity);
         _mask = _capacity - 1;
         _buffer = new T?[_capacity];
+        _sequence = new long[_capacity];
+        // Slot i starts available for the producer holding ticket i.
+        for (int i = 0; i < _capacity; i++)
+            _sequence[i] = i;
         _writeIndex = new PaddedLong { Value = 0 };
         _readIndex = new PaddedLong { Value = 0 };
     }
@@ -59,53 +82,73 @@ internal sealed class LockFreeQueue<T> where T : class
     /// </summary>
     public bool Offer(T item)
     {
-        long currentWrite, nextWrite;
-        do
+        if (item == null) throw new ArgumentNullException(nameof(item));
+
+        while (true)
         {
-            currentWrite = Volatile.Read(ref _writeIndex.Value);
-            nextWrite = currentWrite + 1;
+            long ticket = Volatile.Read(ref _writeIndex.Value);
+            int index = (int)(ticket & _mask);
 
-            // Check if queue is full
-            long currentRead = Volatile.Read(ref _readIndex.Value);
-            if (nextWrite - currentRead > _capacity)
+            // A slot is writable for this ticket only when its published
+            // sequence equals the ticket value. Volatile.Read provides
+            // acquire semantics.
+            long seq = Volatile.Read(ref _sequence[index]);
+            long diff = seq - ticket;
+
+            if (diff == 0)
             {
-                return false; // Queue full
+                // Slot is free for us; try to claim the ticket.
+                if (Interlocked.CompareExchange(ref _writeIndex.Value, ticket + 1, ticket) == ticket)
+                {
+                    // We own this slot. Store the item, then publish the slot by
+                    // bumping its sequence to ticket + 1. The Volatile.Write below
+                    // has release semantics, so the consumer that observes the new
+                    // sequence is guaranteed to also observe the item.
+                    Volatile.Write(ref _buffer[index], item);
+                    Volatile.Write(ref _sequence[index], ticket + 1);
+                    return true;
+                }
+                // Lost the race; retry with a fresh ticket.
             }
+            else if (diff < 0)
+            {
+                // The slot has not been consumed yet for the previous lap, i.e.
+                // sequence < ticket means the consumer is still behind: full.
+                return false;
+            }
+            // diff > 0: another producer already advanced past this ticket;
+            // retry to pick up the latest _writeIndex.
         }
-        while (Interlocked.CompareExchange(ref _writeIndex.Value, nextWrite, currentWrite) != currentWrite);
-
-        // Successfully claimed slot — write the item
-        int index = (int)(currentWrite & _mask);
-        Volatile.Write(ref _buffer[index], item);
-        return true;
     }
 
     /// <summary>
     /// Non-blocking dequeue. Called by the single consumer thread only.
-    /// Returns the item, or null if the queue is empty or the item hasn't been written yet.
+    /// Returns the item, or null if the queue is empty or the item hasn't been published yet.
     /// </summary>
     public T? Poll()
     {
-        long currentRead = Volatile.Read(ref _readIndex.Value);
-        long currentWrite = Volatile.Read(ref _writeIndex.Value);
+        long ticket = Volatile.Read(ref _readIndex.Value);
+        int index = (int)(ticket & _mask);
 
-        if (currentRead >= currentWrite)
+        // The slot is ready to be consumed only once its sequence has been
+        // published to ticket + 1 by the producer. Any other value means the
+        // slot is empty or not yet filled -> treat as empty.
+        long seq = Volatile.Read(ref _sequence[index]);
+        if (seq - (ticket + 1) != 0)
         {
-            return null; // Empty
+            return null;
         }
 
-        int index = (int)(currentRead & _mask);
         T? item = Volatile.Read(ref _buffer[index]);
-
-        if (item == null)
-        {
-            return null; // Producer claimed slot but hasn't written yet
-        }
-
-        // Clear slot and advance read index
         Volatile.Write(ref _buffer[index], null);
-        // Use Volatile.Write (release fence) instead of Interlocked — single consumer doesn't need CAS
-        Volatile.Write(ref _readIndex.Value, currentRead + 1);
+
+        // Mark the slot free for the producer that will use it one lap later
+        // (ticket + capacity). Release semantics publish the item-cleared state.
+        Volatile.Write(ref _sequence[index], ticket + _capacity);
+
+        // Single consumer, so a plain volatile write on _readIndex is enough;
+        // producers gate exclusively on per-slot sequence, not on _readIndex.
+        Volatile.Write(ref _readIndex.Value, ticket + 1);
         return item;
     }
 
@@ -145,9 +188,18 @@ internal sealed class LockFreeQueue<T> where T : class
     /// <summary>The actual capacity (power of 2).</summary>
     public int Capacity => _capacity;
 
+    /// <summary>
+    /// Round up to the next power of 2, with a minimum capacity of 2.
+    /// A capacity of 1 is rejected because the per-slot sequence state would
+    /// overlap (ticket and ticket+capacity collapse onto the same slot in a way
+    /// that can let a producer overwrite an unconsumed element).
+    /// </summary>
     private static int NextPowerOf2(int value)
     {
-        if (value <= 0) return 1;
+        if (value <= 2) return 2;
+        if (value > (1 << 30))
+            throw new ArgumentOutOfRangeException(nameof(value), "Capacity too large");
+
         value--;
         value |= value >> 1;
         value |= value >> 2;

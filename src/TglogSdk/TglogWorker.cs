@@ -1673,10 +1673,11 @@ internal sealed class TglogWorker
         }
 
         // 3. Drain and fail all messages remaining in _messageQueue.
-        // A producer may have CAS-claimed a slot (writeIndex++) but not yet written
-        // the item (Volatile.Write). Poll() returns null for such slots.
+        // A producer may have CAS-claimed a slot (writeIndex++) but not yet
+        // published it (it stores the item and then bumps the slot sequence).
+        // Poll() returns null for such not-yet-published slots.
         // We spin briefly when Poll() returns null but the queue reports non-empty
-        // (writeIndex > readIndex), to wait for the in-flight write to complete.
+        // (writeIndex > readIndex), to wait for the in-flight publish to complete.
         // The bounded spin is best-effort for an in-process write that is already
         // committed under normal operation; it is NOT meant to cover a producer
         // racing with shutdown (send + close concurrency is outside the contract).
