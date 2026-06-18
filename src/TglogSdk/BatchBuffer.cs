@@ -272,6 +272,30 @@ internal sealed class BatchBuffer
         return count;
     }
 
+    /// <summary>
+    /// Removes messages that were fully committed before a TCP connection failed.
+    /// The message that straddles the byte boundary, if any, is kept so it can be
+    /// resent whole on another connection.
+    /// </summary>
+    public int AdvancePastCommitted(long committedBytes)
+    {
+        if (committedBytes <= 0 || _messages.Count == 0)
+            return 0;
+
+        int committedCount = CalculateSentMessages(committedBytes);
+        if (committedCount > 0)
+        {
+            NotifyAndRemove(committedCount);
+        }
+        else
+        {
+            _sendBuffers = null;
+            _sendBufferCount = 0;
+        }
+
+        return committedCount;
+    }
+
     /// <summary>Mark the batch for retry. Increments retry count and records timestamps.</summary>
     public void MarkForRetry()
     {

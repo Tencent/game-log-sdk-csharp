@@ -812,28 +812,67 @@ internal sealed class TglogWorker
 
     private SendResult SendBatchTcp(TglogConnection startConn, ArraySegment<byte>[] buffers)
     {
-        // Snapshot the active connections up front. HandleConnectionError() removes
-        // the failing connection from _connections, so iterating against the live
-        // list (or relying on the failing conn for "next") would skip still-healthy
-        // connections. We try every connection that was active at send time, starting
-        // from the round-robin pick, until one accepts the batch.
-        foreach (var conn in EnumerateConnectionsFrom(startConn))
+        // Fix the retry budget before the loop. HandleConnectionError() removes the
+        // failed connection from _connections, so reading Count during the loop would
+        // shrink the remaining retry budget.
+        int maxTries = _connections.Count;
+        int tryCount = 0;
+        var conn = startConn;
+
+        while (tryCount < maxTries)
         {
-            long sent = conn.Send(buffers);
+            long sent = conn.Send(buffers, out long committedBytes);
 
             if (sent < 0)
             {
-                // Connection error — drop it and try the next snapshot entry.
-                _logger.LogError("Worker {WorkerId}: TCP send error on {Endpoint}, trying next", _workerId, conn.Endpoint);
+                if (committedBytes > 0)
+                {
+                    int delivered = _currentBatch.AdvancePastCommitted(committedBytes);
+                    _metrics.AddSucceededMsg(delivered);
+                    _logger.LogError(
+                        "Worker {WorkerId}: TCP partial-write on {Endpoint} ({CommittedBytes} bytes committed, {DeliveredMessages} msgs best-effort delivered), resending remainder on next connection",
+                        _workerId, conn.Endpoint, committedBytes, delivered);
+                }
+                else
+                {
+                    _logger.LogError("Worker {WorkerId}: TCP send error on {Endpoint}, trying next connection", _workerId, conn.Endpoint);
+                }
+
                 HandleConnectionError(conn, true);
-                continue;
+                tryCount++;
+
+                if (_currentBatch.IsEmpty)
+                    return SendResult.Ok();
+
+                if (tryCount < maxTries)
+                {
+                    conn = GetConnection();
+                    if (conn == null)
+                        return SendResult.Error(TglogErrorCode.NoAvailableConn);
+
+                    buffers = _currentBatch.PrepareForSend();
+                    continue;
+                }
+
+                return SendResult.Error(TglogErrorCode.SendFailed);
             }
 
             if (sent == 0)
             {
                 // High watermark exceeded — try the next connection.
                 _logger.LogWarning("Worker {WorkerId}: connection {Endpoint} exceeded high watermark", _workerId, conn.Endpoint);
-                continue;
+                tryCount++;
+
+                if (tryCount < maxTries)
+                {
+                    conn = GetConnection();
+                    if (conn == null)
+                        return SendResult.Error(TglogErrorCode.NoAvailableConn);
+
+                    continue;
+                }
+
+                return SendResult.Error(TglogErrorCode.SendFailed);
             }
 
             // sent > 0: Success (data sent directly or buffered)
