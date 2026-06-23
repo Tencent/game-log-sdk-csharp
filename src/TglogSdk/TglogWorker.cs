@@ -593,6 +593,8 @@ internal sealed class TglogWorker
 
     private void CheckConnectingConnections()
     {
+        long now = Environment.TickCount64;
+
         for (int i = _connectingConns.Count - 1; i >= 0; i--)
         {
             var conn = _connectingConns[i];
@@ -624,23 +626,40 @@ internal sealed class TglogWorker
             }
             else if (conn.State == TglogConnection.ConnectionState.Error || conn.Socket == null)
             {
-                _connectingConns.RemoveAt(i);
+                if (conn.State != TglogConnection.ConnectionState.Error)
+                    conn.MarkConnectFailed();
 
-                // If this was a replacement attempt, it failed: drop the reference and
-                // keep the old (expired) connection serving. The next replace cycle will
-                // retry; meanwhile the endpoint does not lose a usable connection.
-                if (conn.ReplacingConn != null)
-                {
-                    _logger.LogWarning("Worker {WorkerId}: replacement connection failed, keeping expired connection alive: {Endpoint}", _workerId, conn.Endpoint);
-                    conn.ReplacingConn = null;
-                }
+                RemoveFailedConnectingConnection(i, conn);
+            }
+            else if (conn.IsConnectTimedOut(now, _config.ConnectionTimeoutMs))
+            {
+                _logger.LogWarning(
+                    "Worker {WorkerId}: connection timed out after {TimeoutMs}ms: {Endpoint}",
+                    _workerId, _config.ConnectionTimeoutMs, conn.Endpoint);
 
-                MarkEndpointUnavailable(conn.Endpoint);
-                UnregisterSocket(conn);
-                conn.Close();
-                _metrics.IncrementErrorConn(_workerId);
+                conn.MarkConnectFailed();
+                RemoveFailedConnectingConnection(i, conn);
             }
         }
+    }
+
+    private void RemoveFailedConnectingConnection(int index, TglogConnection conn)
+    {
+        _connectingConns.RemoveAt(index);
+
+        // If this was a replacement attempt, it failed: drop the reference and
+        // keep the old (expired) connection serving. The next replace cycle will
+        // retry; meanwhile the endpoint does not lose a usable connection.
+        if (conn.ReplacingConn != null)
+        {
+            _logger.LogWarning("Worker {WorkerId}: replacement connection failed, keeping expired connection alive: {Endpoint}", _workerId, conn.Endpoint);
+            conn.ReplacingConn = null;
+        }
+
+        MarkEndpointUnavailable(conn.Endpoint);
+        UnregisterSocket(conn);
+        conn.Close();
+        _metrics.IncrementErrorConn(_workerId);
     }
 
     // ==================== Message Processing ====================

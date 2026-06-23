@@ -59,6 +59,7 @@ internal sealed class TglogConnection
 
     // State
     private volatile ConnectionState _state = ConnectionState.Disconnected;
+    private long _connectStartTimeTicks;
     private long _connectTimeTicks;
     private long _lastActiveTimeTicks;
     private long _lifetimeWithJitterMs;
@@ -114,6 +115,8 @@ internal sealed class TglogConnection
     {
         try
         {
+            _connectStartTimeTicks = Environment.TickCount64;
+
             if (_protocol == TglogConfig.Protocol.Tcp)
             {
                 _logger.LogInformation("Connecting to {Endpoint}", _endpoint);
@@ -506,6 +509,14 @@ internal sealed class TglogConnection
             _state = ConnectionState.Error;
             return false;
         }
+    }
+
+    /// <summary>Returns true if a pending connection has exceeded the configured connect timeout.</summary>
+    public bool IsConnectTimedOut(long nowTicks, int timeoutMs)
+    {
+        return _state == ConnectionState.Connecting &&
+               _connectStartTimeTicks > 0 &&
+               nowTicks - _connectStartTimeTicks >= timeoutMs;
     }
 
     /// <summary>Returns true if the connection has exceeded its lifetime (with jitter).</summary>
