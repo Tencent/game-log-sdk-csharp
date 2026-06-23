@@ -1581,16 +1581,26 @@ internal sealed class TglogWorker
             _selectWriteList.Clear();
             bool anyBuffered = false;
 
-            foreach (var conn in _connections)
+            for (int i = _connections.Count - 1; i >= 0; i--)
             {
-                if (conn.Socket != null && conn.HasBufferedData)
+                var conn = _connections[i];
+                if (conn.Socket == null || !conn.HasBufferedData)
+                    continue;
+
+                conn.TryFlush();
+                if (conn.State == TglogConnection.ConnectionState.Error)
                 {
-                    conn.TryFlush();
-                    if (conn.HasBufferedData)
-                    {
-                        _selectWriteList.Add(conn.Socket);
-                        anyBuffered = true;
-                    }
+                    _connections.RemoveAt(i);
+                    _metrics.IncrementErrorConn(_workerId);
+                    FlushOrRescueAndClose(conn);
+                    anyBuffered = true;
+                    continue;
+                }
+
+                if (conn.HasBufferedData)
+                {
+                    _selectWriteList.Add(conn.Socket);
+                    anyBuffered = true;
                 }
             }
             foreach (var dc in _pendingCloseList)
@@ -1607,6 +1617,7 @@ internal sealed class TglogWorker
             }
 
             if (!anyBuffered) return;
+            if (_selectWriteList.Count == 0) continue;
 
             // Wait for any buffered connection to become writable (5ms), like the event loop.
             try
