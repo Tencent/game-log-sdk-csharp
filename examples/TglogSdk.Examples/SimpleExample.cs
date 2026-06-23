@@ -79,7 +79,6 @@ class SimpleExample
             .SetMaxRetries(5)
             .SetSendTimeoutMs(10000)
             .SetMaxConnectionLifetimeSec(300)
-            .SetDebugEnabled(true)
             // Inject any ILoggerFactory — works with Serilog, NLog, MEL built-in, etc.
             .SetLoggerFactory(new ColorConsoleLoggerFactory())
             // Use custom Prometheus registry (optional — default uses global registry)

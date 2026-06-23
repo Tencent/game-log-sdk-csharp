@@ -66,7 +66,6 @@ class TglogClientTest
             .SetWorkerNum(testConfig.WorkerNum)
             .SetBatchingMaxMessages(testConfig.BatchSize)
             .SetBatchingMaxDelayMs(10)
-            .SetDebugEnabled(testConfig.Debug)
             .SetLoggerFactory(loggerFactory);
 
         // Create client

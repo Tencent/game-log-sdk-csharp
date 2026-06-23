@@ -103,11 +103,6 @@ public sealed class TglogConfig
     /// <summary>Shutdown timeout in milliseconds. Default: 3000.</summary>
     public int StopTimeoutMs { get; private set; } = DefaultStopTimeoutMs;
 
-    // --- Debug ---
-
-    /// <summary>Enable debug logging. Default: false.</summary>
-    public bool DebugEnabled { get; private set; }
-
     // --- Logger ---
 
     /// <summary>
@@ -169,7 +164,6 @@ public sealed class TglogConfig
     public TglogConfig SetSendTimeoutMs(int ms) { SendTimeoutMs = ms; return this; }
     public TglogConfig SetMaxRetries(int count) { MaxRetries = count; return this; }
     public TglogConfig SetStopTimeoutMs(int ms) { StopTimeoutMs = ms; return this; }
-    public TglogConfig SetDebugEnabled(bool enabled) { DebugEnabled = enabled; return this; }
     public TglogConfig SetLoggerFactory(ILoggerFactory factory) { LoggerFactory = factory; return this; }
     public TglogConfig SetPrometheusRegistry(CollectorRegistry registry) { PrometheusRegistry = registry; return this; }
 
