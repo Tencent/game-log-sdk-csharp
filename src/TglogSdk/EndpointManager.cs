@@ -18,7 +18,8 @@ internal sealed class EndpointManager : IDisposable
     private Timer? _timer;
     private volatile List<IPEndPoint> _currentEndpoints = new();
     private readonly List<Action<IReadOnlyList<IPEndPoint>>> _changeListeners = new();
-    private bool _disposed;
+    private volatile bool _stopped;
+    private int _updating;
 
     public EndpointManager(TglogConfig config, ILoggerFactory loggerFactory)
     {
@@ -55,6 +56,10 @@ internal sealed class EndpointManager : IDisposable
     /// <summary>Stops the endpoint manager.</summary>
     public void Stop()
     {
+        if (_stopped)
+            return;
+
+        _stopped = true;
         _timer?.Dispose();
         _timer = null;
         _logger.LogInformation("Stopped DNS resolver");
@@ -62,20 +67,24 @@ internal sealed class EndpointManager : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
         Stop();
     }
 
     private void UpdateEndpoints()
     {
+        if (_stopped || Interlocked.Exchange(ref _updating, 1) != 0)
+            return;
+
         try
         {
             var newEndpoints = ResolveHost();
+            if (_stopped)
+                return;
 
-            if (!EndpointsEqual(_currentEndpoints, newEndpoints))
+            var currentEndpoints = _currentEndpoints;
+            if (!EndpointsEqual(currentEndpoints, newEndpoints))
             {
-                _logger.LogInformation($"Endpoints changed for {_host}: {string.Join(", ", _currentEndpoints)} -> {string.Join(", ", newEndpoints)}");
+                _logger.LogInformation($"Endpoints changed for {_host}: {string.Join(", ", currentEndpoints)} -> {string.Join(", ", newEndpoints)}");
 
                 _currentEndpoints = newEndpoints;
                 NotifyListeners(newEndpoints);
@@ -83,7 +92,12 @@ internal sealed class EndpointManager : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError("DNS resolution failed for {Host}: {Message}", _host, ex.Message);
+            if (!_stopped)
+                _logger.LogError("DNS resolution failed for {Host}: {Message}", _host, ex.Message);
+        }
+        finally
+        {
+            Volatile.Write(ref _updating, 0);
         }
     }
 
