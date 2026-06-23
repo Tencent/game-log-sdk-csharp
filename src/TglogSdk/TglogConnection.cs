@@ -322,21 +322,8 @@ internal sealed class TglogConnection
     ///    0: High watermark exceeded
     ///   >0: Total bytes accepted
     /// </summary>
-    public long Send(ArraySegment<byte>[] buffers) => Send(buffers, out _);
-
-    /// <summary>
-    /// Sends multiple buffers (gathering write for TCP), reporting bytes committed
-    /// before a TCP write error when the platform exposes that count.
-    ///
-    /// Returns:
-    ///   -1: Connection error
-    ///    0: High watermark exceeded
-    ///   >0: Total bytes accepted
-    /// </summary>
-    public long Send(ArraySegment<byte>[] buffers, out long committedBytes)
+    public long Send(ArraySegment<byte>[] buffers)
     {
-        committedBytes = 0;
-
         if (_state != ConnectionState.Connected || _socket == null)
             return -1;
 
@@ -356,10 +343,7 @@ internal sealed class TglogConnection
                 // Do NOT accept new data on a failed connection — return -1 so the worker
                 // can fail over / rescue instead of reporting a false success.
                 if (_state != ConnectionState.Connected)
-                {
-                    committedBytes = 0;
                     return -1;
-                }
             }
 
             // Check watermark if still have buffered data
@@ -416,7 +400,6 @@ internal sealed class TglogConnection
 
             if (err != SocketError.Success && err != SocketError.WouldBlock)
             {
-                committedBytes = totalSent;
                 _state = ConnectionState.Error;
                 return -1;
             }
@@ -459,13 +442,11 @@ internal sealed class TglogConnection
                 return total;
             }
             _state = ConnectionState.Error;
-            committedBytes = 0;
             return -1;
         }
         catch (ObjectDisposedException)
         {
             _state = ConnectionState.Error;
-            committedBytes = 0;
             return -1;
         }
     }
